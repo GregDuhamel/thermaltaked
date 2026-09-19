@@ -16,7 +16,8 @@ const MAX_REPORT_SIZE: usize = FRAME_PACKET_SIZE + 1;
 pub enum DeviceError {
     #[error("Thermaltake LCD {VENDOR_ID:04x}:{PRODUCT_ID:04x} not found (interface {0} missing)")]
     NotFound(u8),
-    #[error("cannot open {path}: {source} (is the udev rule installed?)")]
+    // The source is left out of the message: callers print the whole chain.
+    #[error("cannot open {path} (is the udev rule installed?)")]
     Open { path: PathBuf, source: io::Error },
     #[error("the LCD did not answer within {0:?}")]
     Timeout(Duration),

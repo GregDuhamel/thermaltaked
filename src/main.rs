@@ -162,6 +162,9 @@ fn run(config: &Config) -> anyhow::Result<()> {
     let refresh = Duration::from_secs_f32(config.refresh_seconds.clamp(0.1, 3600.0));
     let mut scene = Scene::new(config)?;
     let mut lcd = None;
+    // The panel is out of reach until its udev rule grants this session access,
+    // which can be a while after boot, so the same complaint is logged once.
+    let mut complaint = None;
 
     loop {
         let started = Instant::now();
@@ -170,10 +173,15 @@ fn run(config: &Config) -> anyhow::Result<()> {
             match connect(config.brightness) {
                 Ok(connected) => {
                     eprintln!("LCD connected");
+                    complaint = None;
                     lcd = Some(connected);
                 }
                 Err(error) => {
-                    eprintln!("LCD unavailable: {error:#}");
+                    let error = format!("LCD unavailable: {error:#}");
+                    if complaint.as_ref() != Some(&error) {
+                        eprintln!("{error}");
+                        complaint = Some(error);
+                    }
                     pause = RECONNECT_DELAY;
                 }
             }
