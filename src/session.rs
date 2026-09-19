@@ -138,9 +138,10 @@ mod tests {
     use super::*;
 
     /// Builds a `/sys/class/drm` lookalike: one directory per connector,
-    /// holding the two files the state is read from.
-    fn connectors(outputs: &[(&str, &str, &str)]) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!("thermaltaked-drm-{}", std::process::id()));
+    /// holding the two files the state is read from. Each case gets its own
+    /// root, since the tests run side by side.
+    fn connectors(case: &str, outputs: &[(&str, &str, &str)]) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("thermaltaked-drm-{case}"));
         let _ = fs::remove_dir_all(&root);
         for (name, enabled, dpms) in outputs {
             let connector = root.join(name);
@@ -153,23 +154,29 @@ mod tests {
 
     #[test]
     fn asleep_only_when_every_monitor_is_off() {
-        let both_off = connectors(&[
-            ("card1-DP-2", "enabled", "Off"),
-            ("card1-DP-3", "enabled", "Off"),
-            ("card1-HDMI-A-1", "disabled", "Off"),
-        ]);
+        let both_off = connectors(
+            "both-off",
+            &[
+                ("card1-DP-2", "enabled", "Off"),
+                ("card1-DP-3", "enabled", "Off"),
+                ("card1-HDMI-A-1", "disabled", "Off"),
+            ],
+        );
         assert!(monitors_asleep(&both_off));
 
-        let one_on = connectors(&[
-            ("card1-DP-2", "enabled", "Off"),
-            ("card1-DP-3", "enabled", "On"),
-        ]);
+        let one_on = connectors(
+            "one-on",
+            &[
+                ("card1-DP-2", "enabled", "Off"),
+                ("card1-DP-3", "enabled", "On"),
+            ],
+        );
         assert!(!monitors_asleep(&one_on));
     }
 
     #[test]
     fn no_monitor_at_all_is_not_sleep() {
-        let unplugged = connectors(&[("card1-DP-1", "disabled", "Off")]);
+        let unplugged = connectors("unplugged", &[("card1-DP-1", "disabled", "Off")]);
         assert!(!monitors_asleep(&unplugged));
         assert!(!monitors_asleep(Path::new("/nonexistent")));
     }
