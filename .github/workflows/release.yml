@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Semver bump"
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+jobs:
+  release:
+    name: Build and release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: version
+        run: |
+          latest=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          if [ -z "$latest" ]; then
+            # First release: publish the version Cargo.toml already carries.
+            version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          else
+            IFS='.' read -r major minor patch <<< "${latest#v}"
+            case "${{ inputs.bump }}" in
+              major) major=$((major+1)); minor=0; patch=0 ;;
+              minor) minor=$((minor+1)); patch=0 ;;
+              patch) patch=$((patch+1)) ;;
+            esac
+            version="${major}.${minor}.${patch}"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Update Cargo.toml version
+        run: sed -i 's/^version = .*/version = "${{ steps.version.outputs.version }}"/' Cargo.toml
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo test
+        run: cargo test --all-targets
+
+      - name: cargo build --release
+        run: cargo build --release
+
+      - name: Commit version bump and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet Cargo.toml Cargo.lock; then
+            git add Cargo.toml Cargo.lock
+            git commit -m "Release v${{ steps.version.outputs.version }}"
+            git push origin main
+          fi
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
+
+      - name: Rename binary
+        run: cp target/release/thermaltaked thermaltaked-x86_64-linux
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          files: |
+            thermaltaked-x86_64-linux
+            udev/70-thermaltake-lcd.rules
+            systemd/thermaltaked.service
+            config.example.toml
+          generate_release_notes: true
