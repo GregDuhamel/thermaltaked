@@ -4,7 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use chrono::{DateTime, Local, Timelike};
+use chrono::{DateTime, Local};
 use clap::{Parser, Subcommand};
 use image::{Rgb, RgbImage};
 use signal_hook::consts::{SIGINT, SIGTERM};
@@ -20,6 +20,9 @@ use thermaltaked::session::{ScreenState, Screens};
 use thermaltaked::weather::WeatherFeed;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
+/// Left without a frame for some twenty seconds, the panel falls back to its
+/// own screen, so the clock is sent again well before that.
+const CLOCK_KEEPALIVE: Duration = Duration::from_secs(5);
 /// /proc/stat needs two samples before a CPU usage can be computed.
 const CPU_SAMPLE_DELAY: Duration = Duration::from_millis(250);
 
@@ -193,7 +196,7 @@ fn run(config: &Config) -> anyhow::Result<()> {
     // which can be a while after boot, so the same complaint is logged once.
     let mut complaint = None;
     let mut shown = None;
-    let mut clock_minute = None;
+    let mut clock_sent: Option<Instant> = None;
 
     loop {
         let started = Instant::now();
@@ -224,11 +227,13 @@ fn run(config: &Config) -> anyhow::Result<()> {
         if shown != Some(state) {
             eprintln!("{}", describe(state));
             shown = Some(state);
-            clock_minute = None;
+            clock_sent = None;
         }
 
-        // The clock carries no seconds, so it is only redrawn once a minute.
-        let due = state == ScreenState::Awake || clock_minute != Some(now.minute());
+        // The clock has no seconds to show, so it goes out at the slower pace
+        // the panel needs to keep displaying it.
+        let due = state == ScreenState::Awake
+            || clock_sent.is_none_or(|sent| sent.elapsed() >= CLOCK_KEEPALIVE);
         if let Some(connected) = &lcd
             && due
         {
@@ -237,7 +242,7 @@ fn run(config: &Config) -> anyhow::Result<()> {
                 _ => scene.clock_frame(now),
             };
             match connected.send_frame(&frame) {
-                Ok(()) => clock_minute = Some(now.minute()),
+                Ok(()) => clock_sent = Some(Instant::now()),
                 Err(error) => {
                     eprintln!("LCD lost: {error:#}");
                     lcd = None;
