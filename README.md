@@ -10,8 +10,13 @@ current weather (Open-Meteo).
 
 ![The dashboard, drawn from made-up readings](docs/dashboard.png)
 
-The screenshot above is the real 480x128 frame, rendered from invented readings
-by `cargo run --example demo_frame`.
+While the monitors are off or the session is locked, it shows the date and the
+time, and nothing else:
+
+![The sleeping screen, showing only a date and a clock](docs/clock.png)
+
+Both screenshots are real 480x128 frames, rendered from invented readings by
+`cargo run --example demo_frame`.
 
 ## Setup
 
@@ -53,8 +58,8 @@ every 2 s. Interface 1 takes a JPEG split into 1020-byte chunks, each in a
 ## Configuration
 
 Everything in `config.example.toml` is optional: refresh rate, brightness,
-fonts, the weather city, the gauge titles and which fans to show, in which
-order. Without a configuration file the dashboard detects the hardware by
+fonts, the weather city, the gauge titles, which fans to show in which order,
+and whether to fall back to the clock while nobody is watching. Without a configuration file the dashboard detects the hardware by
 itself and leaves the weather out.
 
 ## Protocol knowledge

@@ -17,6 +17,9 @@ pub struct Config {
     pub brightness: u8,
     pub font_regular: PathBuf,
     pub font_bold: PathBuf,
+    /// Show only the date and time while the monitors are off or the session
+    /// is locked, instead of the dashboard.
+    pub clock_when_away: bool,
     pub weather: WeatherConfig,
     /// Gauge titles; whatever is left out is detected from the hardware.
     pub names: Names,
@@ -44,6 +47,7 @@ impl Default for Config {
             brightness: 100,
             font_regular: "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf".into(),
             font_bold: "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf".into(),
+            clock_when_away: true,
             weather: WeatherConfig::default(),
             names: Names::default(),
             psu_rating: None,

@@ -6,4 +6,5 @@ pub mod lcd;
 pub mod protocol;
 pub mod render;
 pub mod sensors;
+pub mod session;
 pub mod weather;

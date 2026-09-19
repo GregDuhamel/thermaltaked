@@ -3,6 +3,10 @@
 refresh_seconds = 1.0   # seconds between frames
 brightness = 100    # 0..100
 
+# Show only the date and time while the monitors are off or the session is
+# locked, instead of the dashboard.
+clock_when_away = true
+
 # font_regular = "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"
 # font_bold = "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf"
 

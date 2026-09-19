@@ -1,5 +1,5 @@
-//! Renders the README's screenshot from made-up readings, so the image shows
-//! the real layout without anyone's machine in it.
+//! Renders the README's screenshots from made-up readings, so the images show
+//! the real layouts without anyone's machine in them.
 //!
 //! Run with: `cargo run --example demo_frame`
 
@@ -8,7 +8,8 @@ use thermaltaked::render::Dashboard;
 use thermaltaked::sensors::{Fan, Names, Snapshot};
 use thermaltaked::weather::Weather;
 
-const OUTPUT: &str = "docs/dashboard.png";
+const DASHBOARD: &str = "docs/dashboard.png";
+const CLOCK: &str = "docs/clock.png";
 
 fn main() -> anyhow::Result<()> {
     let names = Names {
@@ -61,7 +62,8 @@ fn main() -> anyhow::Result<()> {
     let dashboard = Dashboard::new(&config.font_regular, &config.font_bold)?;
     dashboard
         .render(&snapshot, Some(&weather), now)
-        .save(OUTPUT)?;
-    println!("wrote {OUTPUT}");
+        .save(DASHBOARD)?;
+    dashboard.render_clock(now).save(CLOCK)?;
+    println!("wrote {DASHBOARD} and {CLOCK}");
     Ok(())
 }

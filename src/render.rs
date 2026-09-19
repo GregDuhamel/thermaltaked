@@ -49,6 +49,12 @@ const DAYS: [&str; 7] = [
     "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche",
 ];
 
+/// The date as the panel spells it: "Samedi 19/09/26".
+fn format_date(now: DateTime<Local>) -> String {
+    let day = DAYS[now.weekday().num_days_from_monday() as usize];
+    format!("{day} {}", now.format("%d/%m/%y"))
+}
+
 /// One dashboard column: a title, a big value and a usage bar.
 struct Gauge<'a> {
     title: &'a str,
@@ -269,6 +275,20 @@ impl Dashboard {
         });
     }
 
+    /// The whole panel given over to the date and the time, for when the
+    /// monitor is asleep or the session is locked.
+    #[must_use]
+    pub fn render_clock(&self, now: DateTime<Local>) -> RgbImage {
+        let mut canvas = RgbImage::from_pixel(WIDTH, HEIGHT, BACKGROUND);
+        let image = &mut canvas;
+        let center = WIDTH as i32 / 2;
+        let date = format_date(now);
+        self.text_centered(image, center, 18, 20.0, false, DATE, &date);
+        let time = now.format("%H:%M").to_string();
+        self.text_centered(image, center, 42, 76.0, true, TEXT, &time);
+        canvas
+    }
+
     #[must_use]
     pub fn render(
         &self,
@@ -352,8 +372,7 @@ impl Dashboard {
 
         // Date, clock and weather share the right column's axis.
         let center = RIGHT_COLUMN_CENTER;
-        let day = DAYS[now.weekday().num_days_from_monday() as usize];
-        let date = format!("{day} {}", now.format("%d/%m/%y"));
+        let date = format_date(now);
         self.text_centered(image, center, 26, 15.0, false, DATE, &date);
         let time = now.format("%H:%M").to_string();
         self.text_centered(image, center, 38, 44.0, true, TEXT, &time);
