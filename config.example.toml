@@ -1,0 +1,28 @@
+# Copy to ~/.config/thermaltaked/config.toml. Every key is optional.
+
+refresh_seconds = 1.0   # seconds between frames
+brightness = 100    # 0..100
+
+# font_regular = "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"
+# font_bold = "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf"
+
+# Rated wattage of the power supply, for its load bar. Read from the model
+# name when left out (HX1200i: 1200 W).
+# psu_rating = 1200
+
+[weather]
+city = "Paris"          # resolved through Open-Meteo; remove to disable weather
+refresh_minutes = 15
+
+# Gauge titles. Detected from the hardware when left out; names too long for
+# their column lose their leading words.
+[names]
+# cpu = "Ryzen 9"
+# gpu = "RX 9070 XT"
+# psu = "HX1200i"
+
+# Fan names, keyed by "<hwmon chip>/<fanN>" (see /sys/class/hwmon/*/name).
+# Left empty, every spinning fan is shown; otherwise only the listed ones.
+[fans]
+# "nct6799/fan1" = "front"
+# "amdgpu/fan1" = "gpu"

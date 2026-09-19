@@ -1,0 +1,30 @@
+[package]
+name = "thermaltaked"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ab_glyph = "0.2.32"
+anyhow = "1.0.104"
+chrono = "0.4.45"
+clap = { version = "4.6.7", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+imageproc = { version = "0.25", default-features = false }
+indexmap = { version = "2.14.2", features = ["serde"] }
+libc = "0.2.189"
+serde = { version = "1.0.229", features = ["derive"] }
+signal-hook = "0.4.4"
+thiserror = "2.0.20"
+toml = { version = "1.1.6", features = ["preserve_order"] }
+ureq = { version = "3.4.2", features = ["json"] }
+
+[dev-dependencies]
+serde_json = "1.0.151"
+
+# The crate is a library with a binary on top, so its public API is documented
+# as one: these are the pedantic lints that keep it that way.
+[lints.clippy]
+doc_markdown = "warn"
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+must_use_candidate = "warn"

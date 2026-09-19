@@ -1,0 +1,11 @@
+[Unit]
+Description=Thermaltake LCD dashboard
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.cargo/bin/thermaltaked run
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

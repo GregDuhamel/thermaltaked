@@ -1,0 +1,4 @@
+# Thermaltake 3.9" bar LCD (264a:233d): give the logged-in user access to both
+# HID interfaces (command and frame). The file must sort before systemd's
+# 73-seat-late.rules, which is what turns the uaccess tag into an ACL.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="264a", ATTRS{idProduct}=="233d", TAG+="uaccess"
