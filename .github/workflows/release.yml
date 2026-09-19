@@ -1,17 +1,9 @@
 name: Release
 
+# Tags and publishes whatever version Cargo.toml carries. Bumping that version
+# is an ordinary pull request, since main takes no direct pushes.
 on:
   workflow_dispatch:
-    inputs:
-      bump:
-        description: "Semver bump"
-        required: true
-        default: patch
-        type: choice
-        options:
-          - patch
-          - minor
-          - major
 
 jobs:
   release:
@@ -22,29 +14,21 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      - name: Compute next version
+      - name: Read the version
         id: version
         run: |
-          latest=$(git tag --list 'v*' --sort=-v:refname | head -1)
-          if [ -z "$latest" ]; then
-            # First release: publish the version Cargo.toml already carries.
-            version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          else
-            IFS='.' read -r major minor patch <<< "${latest#v}"
-            case "${{ inputs.bump }}" in
-              major) major=$((major+1)); minor=0; patch=0 ;;
-              minor) minor=$((minor+1)); patch=0 ;;
-              patch) patch=$((patch+1)) ;;
-            esac
-            version="${major}.${minor}.${patch}"
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ -z "$version" ]; then
+            echo "no version in Cargo.toml" >&2
+            exit 1
+          fi
+          if git tag --list "v$version" | grep -q .; then
+            echo "v$version is already released: bump the version in Cargo.toml first" >&2
+            exit 1
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-
-      - name: Update Cargo.toml version
-        run: sed -i 's/^version = .*/version = "${{ steps.version.outputs.version }}"/' Cargo.toml
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -53,20 +37,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: cargo test
-        run: cargo test --all-targets
+        run: cargo test --locked --all-targets
 
       - name: cargo build --release
-        run: cargo build --release
+        run: cargo build --locked --release
 
-      - name: Commit version bump and tag
+      - name: Tag the release
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if ! git diff --quiet Cargo.toml Cargo.lock; then
-            git add Cargo.toml Cargo.lock
-            git commit -m "Release v${{ steps.version.outputs.version }}"
-            git push origin main
-          fi
           git tag "v${{ steps.version.outputs.version }}"
           git push origin "v${{ steps.version.outputs.version }}"
 

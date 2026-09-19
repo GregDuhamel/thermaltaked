@@ -70,6 +70,12 @@ It comes from
 and [thermaltake-lcd-linux](https://github.com/pcmx1/thermaltake-lcd-linux),
 which this project reimplements in Rust rather than copies.
 
+## Releasing
+
+Bump `version` in `Cargo.toml` through a pull request, then run the Release
+workflow: it tags that version, builds the binary and publishes it with the
+udev rule, the service unit and the example configuration.
+
 ## License
 
 GPL-3.0-or-later, see [LICENSE](LICENSE). `ttlcd`, where the protocol was first
