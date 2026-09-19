@@ -1,6 +1,8 @@
 # Copy to ~/.config/thermaltaked/config.toml. Every key is optional.
 
-refresh_seconds = 1.0   # seconds between frames
+# Seconds between frames. The panel returns to its own screen when a few of
+# them go by without one, so anything above two seconds is brought back to two.
+refresh_seconds = 1.0
 brightness = 100    # 0..100
 
 # Show only the date and time while the monitors are off or the session is

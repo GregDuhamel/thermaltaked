@@ -20,9 +20,6 @@ use thermaltaked::session::{ScreenState, Screens};
 use thermaltaked::weather::WeatherFeed;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
-/// Left without a frame for some twenty seconds, the panel falls back to its
-/// own screen, so the clock is sent again well before that.
-const CLOCK_KEEPALIVE: Duration = Duration::from_secs(5);
 /// /proc/stat needs two samples before a CPU usage can be computed.
 const CPU_SAMPLE_DELAY: Duration = Duration::from_millis(250);
 
@@ -189,14 +186,13 @@ fn describe(state: ScreenState) -> String {
 fn run(config: &Config) -> anyhow::Result<()> {
     let stopped = stop_requests()?;
     let screens = Screens::new();
-    let refresh = Duration::from_secs_f32(config.refresh_seconds.clamp(0.1, 3600.0));
+    let refresh = Duration::from_secs_f32(config.refresh_seconds);
     let mut scene = Scene::new(config)?;
     let mut lcd = None;
     // The panel is out of reach until its udev rule grants this session access,
     // which can be a while after boot, so the same complaint is logged once.
     let mut complaint = None;
     let mut shown = None;
-    let mut clock_sent: Option<Instant> = None;
 
     loop {
         let started = Instant::now();
@@ -227,27 +223,19 @@ fn run(config: &Config) -> anyhow::Result<()> {
         if shown != Some(state) {
             eprintln!("{}", describe(state));
             shown = Some(state);
-            clock_sent = None;
         }
 
-        // The clock has no seconds to show, so it goes out at the slower pace
-        // the panel needs to keep displaying it.
-        let due = state == ScreenState::Awake
-            || clock_sent.is_none_or(|sent| sent.elapsed() >= CLOCK_KEEPALIVE);
-        if let Some(connected) = &lcd
-            && due
-        {
+        // Every frame goes out at the same pace, the clock included: left a few
+        // seconds without one, the panel drops it for its own screen.
+        if let Some(connected) = &lcd {
             let frame = match state {
                 ScreenState::Awake => scene.dashboard_frame(now),
                 _ => scene.clock_frame(now),
             };
-            match connected.send_frame(&frame) {
-                Ok(()) => clock_sent = Some(Instant::now()),
-                Err(error) => {
-                    eprintln!("LCD lost: {error:#}");
-                    lcd = None;
-                    pause = RECONNECT_DELAY;
-                }
+            if let Err(error) = connected.send_frame(&frame) {
+                eprintln!("LCD lost: {error:#}");
+                lcd = None;
+                pause = RECONNECT_DELAY;
             }
         }
 

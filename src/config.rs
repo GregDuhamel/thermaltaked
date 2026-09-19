@@ -9,10 +9,16 @@ use serde::Deserialize;
 
 use crate::sensors::Names;
 
+/// The panel drops the frame it shows for its own screen when a few seconds
+/// pass without a new one, so a slower refresh is not offered.
+const MAX_REFRESH_SECONDS: f32 = 2.0;
+const MIN_REFRESH_SECONDS: f32 = 0.1;
+const DEFAULT_REFRESH_SECONDS: f32 = 1.0;
+
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// Seconds between two frames.
+    /// Seconds between two frames, brought back within 0.1 and 2 on load.
     pub refresh_seconds: f32,
     pub brightness: u8,
     pub font_regular: PathBuf,
@@ -43,7 +49,7 @@ pub struct WeatherConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            refresh_seconds: 1.0,
+            refresh_seconds: DEFAULT_REFRESH_SECONDS,
             brightness: 100,
             font_regular: "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf".into(),
             font_bold: "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf".into(),
@@ -88,6 +94,47 @@ impl Config {
         };
         let text =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        Self::parse(&text).with_context(|| format!("parsing {}", path.display()))
+    }
+
+    fn parse(text: &str) -> anyhow::Result<Self> {
+        let mut config: Self = toml::from_str(text)?;
+        let asked = config.refresh_seconds;
+        config.refresh_seconds = if asked.is_finite() {
+            asked.clamp(MIN_REFRESH_SECONDS, MAX_REFRESH_SECONDS)
+        } else {
+            DEFAULT_REFRESH_SECONDS
+        };
+        if config.refresh_seconds != asked {
+            eprintln!(
+                "refresh_seconds {asked} is out of reach, using {}",
+                config.refresh_seconds
+            );
+        }
+        Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn refresh(text: &str) -> f32 {
+        Config::parse(text).unwrap().refresh_seconds
+    }
+
+    #[test]
+    fn refresh_stays_within_what_the_panel_accepts() {
+        assert_eq!(refresh("refresh_seconds = 1.5"), 1.5);
+        assert_eq!(refresh("refresh_seconds = 60.0"), MAX_REFRESH_SECONDS);
+        assert_eq!(refresh("refresh_seconds = 0.0"), MIN_REFRESH_SECONDS);
+        assert_eq!(refresh("refresh_seconds = -3.0"), MIN_REFRESH_SECONDS);
+        assert_eq!(refresh("refresh_seconds = nan"), DEFAULT_REFRESH_SECONDS);
+        assert_eq!(refresh(""), DEFAULT_REFRESH_SECONDS);
+    }
+
+    #[test]
+    fn unknown_keys_are_refused() {
+        assert!(Config::parse("refresh_secondes = 1.0").is_err());
     }
 }
