@@ -2,6 +2,10 @@
 name = "thermaltaked"
 version = "0.1.0"
 edition = "2024"
+description = "Driver and dashboard daemon for the Thermaltake 3.9\" bar LCD (264a:233d) on Linux"
+repository = "https://github.com/GregDuhamel/thermaltaked"
+license = "GPL-3.0-or-later"
+readme = "README.md"
 
 [dependencies]
 ab_glyph = "0.2.32"

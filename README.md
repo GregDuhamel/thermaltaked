@@ -5,7 +5,13 @@ Rust driver and dashboard daemon for the Thermaltake 3.9" bar LCD
 libusb or vendor software.
 
 The dashboard shows hostname, kernel, load average, CPU and GPU temperature and
-usage, fan speeds, the time and the current weather (Open-Meteo).
+usage, fan speeds, the power drawn from the supply, the date and time, and the
+current weather (Open-Meteo).
+
+![The dashboard, drawn from made-up readings](docs/dashboard.png)
+
+The screenshot above is the real 480x128 frame, rendered from invented readings
+by `cargo run --example demo_frame`.
 
 ## Setup
 
@@ -44,7 +50,22 @@ every 2 s. Interface 1 takes a JPEG split into 1020-byte chunks, each in a
 1024-byte report: `[08, packet count, 00, 80]` for the first, `[08, index, 00,
 00]` for the rest. See `src/protocol.rs`.
 
-Protocol knowledge comes from
+## Configuration
+
+Everything in `config.example.toml` is optional: refresh rate, brightness,
+fonts, the weather city, the gauge titles and which fans to show, in which
+order. Without a configuration file the dashboard detects the hardware by
+itself and leaves the weather out.
+
+## Protocol knowledge
+
+It comes from
 [ttlcd](https://github.com/bekindpleaserewind/ttlcd),
 [Tower-500-LCD-Controller](https://github.com/JohnathanKong/Tower-500-LCD-Controller)
-and [thermaltake-lcd-linux](https://github.com/pcmx1/thermaltake-lcd-linux).
+and [thermaltake-lcd-linux](https://github.com/pcmx1/thermaltake-lcd-linux),
+which this project reimplements in Rust rather than copies.
+
+## License
+
+GPL-3.0-or-later, see [LICENSE](LICENSE). `ttlcd`, where the protocol was first
+described, is GPL-3.0.
