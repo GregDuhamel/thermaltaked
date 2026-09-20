@@ -3,6 +3,7 @@
 use std::env;
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::OwnedObjectPath;
@@ -16,6 +17,9 @@ const MANAGER_PATH: &str = "/org/freedesktop/login1";
 const MANAGER: &str = "org.freedesktop.login1.Manager";
 const SESSION: &str = "org.freedesktop.login1.Session";
 const GRAPHICAL_TYPES: [&str; 2] = ["wayland", "x11"];
+/// A service can start before anyone logs in, so a missing session is worth
+/// coming back to rather than giving up on.
+const RETRY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenState {
@@ -68,6 +72,8 @@ fn monitors_asleep(connectors: &Path) -> bool {
 /// frame: the monitors come from sysfs, the lock from logind over D-Bus.
 pub struct Screens {
     session: Option<Proxy<'static>>,
+    last_try: Instant,
+    complained: bool,
 }
 
 fn graphical_session(connection: &Connection) -> zbus::Result<OwnedObjectPath> {
@@ -94,29 +100,63 @@ fn graphical_session(connection: &Connection) -> zbus::Result<OwnedObjectPath> {
 }
 
 impl Screens {
-    /// Without a reachable logind the lock goes unnoticed, which is worth one
-    /// line on stderr and no more: the monitors still say most of it.
     #[must_use]
     pub fn new() -> Self {
-        let session = Connection::system()
-            .and_then(|connection| {
-                let path = graphical_session(&connection)?;
-                Proxy::new(&connection, LOGIND, path, SESSION)
-            })
-            .inspect_err(|error| eprintln!("lock state unavailable: {error}"))
-            .ok();
-        Self { session }
+        let mut screens = Self {
+            session: None,
+            last_try: Instant::now(),
+            complained: false,
+        };
+        screens.connect();
+        screens
     }
 
-    fn locked(&self) -> bool {
-        self.session
-            .as_ref()
-            .and_then(|session| session.get_property::<bool>("LockedHint").ok())
-            .unwrap_or(false)
+    /// Looks logind up again. Until it answers, the lock goes unnoticed, which
+    /// is worth one line on stderr and no more: the monitors still say most of
+    /// it.
+    fn connect(&mut self) {
+        self.last_try = Instant::now();
+        match Connection::system().and_then(|connection| {
+            let path = graphical_session(&connection)?;
+            Proxy::new(&connection, LOGIND, path, SESSION)
+        }) {
+            Ok(session) => {
+                if self.complained {
+                    eprintln!("lock state readable again");
+                }
+                self.complained = false;
+                self.session = Some(session);
+            }
+            Err(error) => {
+                if !self.complained {
+                    eprintln!("lock state unavailable: {error}");
+                    self.complained = true;
+                }
+            }
+        }
+    }
+
+    fn locked(&mut self) -> bool {
+        if self.session.is_none() && self.last_try.elapsed() >= RETRY {
+            self.connect();
+        }
+        let Some(session) = &self.session else {
+            return false;
+        };
+        match session.get_property::<bool>("LockedHint") {
+            Ok(locked) => locked,
+            Err(error) => {
+                // The bus went away with the session: look it up again later.
+                eprintln!("lock state lost: {error}");
+                self.session = None;
+                self.last_try = Instant::now();
+                false
+            }
+        }
     }
 
     #[must_use]
-    pub fn state(&self) -> ScreenState {
+    pub fn state(&mut self) -> ScreenState {
         if self.locked() {
             ScreenState::Locked
         } else if monitors_asleep(Path::new(CONNECTORS)) {

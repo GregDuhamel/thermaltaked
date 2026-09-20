@@ -123,7 +123,10 @@ impl Scene {
             .render(&self.sensors.snapshot(), weather.as_ref(), now)
     }
 
-    fn clock_frame(&self, now: DateTime<Local>) -> RgbImage {
+    fn clock_frame(&mut self, now: DateTime<Local>) -> RgbImage {
+        // The dashboard is not drawn while away, so its CPU usage would
+        // otherwise come back averaged over the whole absence.
+        self.sensors.sample_cpu();
         self.dashboard.render_clock(now)
     }
 }
@@ -185,7 +188,7 @@ fn describe(state: ScreenState) -> String {
 
 fn run(config: &Config) -> anyhow::Result<()> {
     let stopped = stop_requests()?;
-    let screens = Screens::new();
+    let mut screens = Screens::new();
     let refresh = Duration::from_secs_f32(config.refresh_seconds);
     let mut scene = Scene::new(config)?;
     let mut lcd = None;

@@ -268,6 +268,12 @@ impl Sensors {
         Some(busy as f32 * 100.0 / total as f32)
     }
 
+    /// Takes a /proc/stat sample and throws it away, so that the next usage
+    /// is measured from now rather than from whenever the dashboard last ran.
+    pub fn sample_cpu(&mut self) {
+        let _ = self.cpu_usage();
+    }
+
     pub fn snapshot(&mut self) -> Snapshot<'_> {
         let cpu_usage = self.cpu_usage();
         let millidegrees = |path: &Option<PathBuf>| Some(read_number(path.as_ref()?)? / 1000.0);
