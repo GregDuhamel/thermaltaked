@@ -39,9 +39,10 @@ const VALUE_TOP: i32 = 33;
 const BAR_TOP: i32 = 68;
 const BAR_HEIGHT: u32 = 5;
 const COLUMN_GAP: i32 = 14;
-/// Side of the cover art, and of the square it is drawn in.
-pub const ART_SIZE: u32 = 104;
-const ART_TOP: i32 = 12;
+/// Side of the cover art: the panel's full height, flush with its left edge.
+pub const ART_SIZE: u32 = HEIGHT;
+/// Room between the cover and the text beside it.
+const ART_GAP: i32 = 16;
 const FAN_BAND_TOP: i32 = 88;
 /// The clock and weather column starts here.
 const RIGHT_COLUMN_LEFT: i32 = 318;
@@ -314,16 +315,12 @@ impl Dashboard {
     ) -> RgbImage {
         let mut canvas = RgbImage::from_pixel(WIDTH, HEIGHT, BACKGROUND);
         let image = &mut canvas;
-        let left = match art {
-            Some(art) => {
-                image::imageops::replace(image, art, i64::from(MARGIN + 4), i64::from(ART_TOP));
-                MARGIN + 4 + ART_SIZE as i32 + 16
-            }
-            None => {
-                rect(image, MARGIN + 4, ART_TOP, ART_SIZE, ART_SIZE, HEADER);
-                MARGIN + 4 + ART_SIZE as i32 + 16
-            }
-        };
+        match art {
+            Some(art) => image::imageops::replace(image, art, 0, 0),
+            // A plain square holds the place until the cover arrives.
+            None => rect(image, 0, 0, ART_SIZE, ART_SIZE, HEADER),
+        }
+        let left = ART_SIZE as i32 + ART_GAP;
         let right = WIDTH as i32 - MARGIN;
         let width = (right - left) as u32;
 
