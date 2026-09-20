@@ -9,6 +9,10 @@ brightness = 100    # 0..100
 # locked, instead of the dashboard.
 clock_when_away = true
 
+# Give the panel over to whatever is playing, for as long as it plays. Any
+# player that speaks MPRIS will do: Deezer, Spotify, a browser, a local player.
+show_player = true
+
 # font_regular = "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"
 # font_bold = "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf"
 

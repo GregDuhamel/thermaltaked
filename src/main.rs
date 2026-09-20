@@ -10,11 +10,13 @@ use image::{Rgb, RgbImage};
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 
+use thermaltaked::art::CoverArt;
 use thermaltaked::config::Config;
 use thermaltaked::device;
 use thermaltaked::lcd::Lcd;
+use thermaltaked::player::{NowPlaying, Players};
 use thermaltaked::protocol::{HEIGHT, PRODUCT_ID, VENDOR_ID, WIDTH};
-use thermaltaked::render::Dashboard;
+use thermaltaked::render::{ART_SIZE, Dashboard};
 use thermaltaked::sensors::Sensors;
 use thermaltaked::session::{ScreenState, Screens};
 use thermaltaked::weather::WeatherFeed;
@@ -101,6 +103,10 @@ struct Scene {
     dashboard: Dashboard,
     sensors: Sensors,
     weather: Option<WeatherFeed>,
+    players: Players,
+    cover: CoverArt,
+    /// The cover last drawn, kept so it is fetched once per track.
+    art: Option<(String, RgbImage)>,
 }
 
 impl Scene {
@@ -114,6 +120,9 @@ impl Scene {
                 .city
                 .clone()
                 .map(|city| WeatherFeed::start(city, weather_refresh)),
+            players: Players::new(),
+            cover: CoverArt::new(),
+            art: None,
         })
     }
 
@@ -121,6 +130,22 @@ impl Scene {
         let weather = self.weather.as_ref().and_then(WeatherFeed::latest);
         self.dashboard
             .render(&self.sensors.snapshot(), weather.as_ref(), now)
+    }
+
+    fn player_frame(&mut self, playing: &NowPlaying, now: DateTime<Local>) -> RgbImage {
+        // Neither the player nor the clock draws the dashboard, so its CPU
+        // usage would otherwise come back averaged over the whole absence.
+        self.sensors.sample_cpu();
+        match &playing.track.art_url {
+            Some(url) => {
+                if self.art.as_ref().is_none_or(|(drawn, _)| drawn != url) {
+                    self.art = self.cover.get(url, ART_SIZE).map(|art| (url.clone(), art));
+                }
+            }
+            None => self.art = None,
+        }
+        let art = self.art.as_ref().map(|(_, art)| art);
+        self.dashboard.render_player(playing, art, now)
     }
 
     fn clock_frame(&mut self, now: DateTime<Local>) -> RgbImage {
@@ -223,17 +248,30 @@ fn run(config: &Config) -> anyhow::Result<()> {
         } else {
             ScreenState::Awake
         };
-        if shown != Some(state) {
-            eprintln!("{}", describe(state));
-            shown = Some(state);
+        let playing = if config.show_player {
+            scene.players.playing()
+        } else {
+            None
+        };
+        let showing = match &playing {
+            Some(playing) => format!(
+                "playing: {} — {}",
+                playing.track.artist, playing.track.title
+            ),
+            None => describe(state),
+        };
+        if shown.as_ref() != Some(&showing) {
+            eprintln!("{showing}");
+            shown = Some(showing);
         }
 
         // Every frame goes out at the same pace, the clock included: left a few
         // seconds without one, the panel drops it for its own screen.
         if let Some(connected) = &lcd {
-            let frame = match state {
-                ScreenState::Awake => scene.dashboard_frame(now),
-                _ => scene.clock_frame(now),
+            let frame = match (&playing, state) {
+                (Some(playing), _) => scene.player_frame(playing, now),
+                (None, ScreenState::Awake) => scene.dashboard_frame(now),
+                (None, _) => scene.clock_frame(now),
             };
             if let Err(error) = connected.send_frame(&frame) {
                 eprintln!("LCD lost: {error:#}");

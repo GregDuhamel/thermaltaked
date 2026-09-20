@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
 use anyhow::Context;
@@ -10,6 +11,7 @@ use image::{Rgb, RgbImage};
 use imageproc::drawing::{draw_filled_rect_mut, draw_text_mut, text_size};
 use imageproc::rect::Rect;
 
+use crate::player::NowPlaying;
 use crate::protocol::{HEIGHT, WIDTH};
 use crate::sensors::Snapshot;
 use crate::weather::Weather;
@@ -37,6 +39,9 @@ const VALUE_TOP: i32 = 33;
 const BAR_TOP: i32 = 68;
 const BAR_HEIGHT: u32 = 5;
 const COLUMN_GAP: i32 = 14;
+/// Side of the cover art, and of the square it is drawn in.
+pub const ART_SIZE: u32 = 104;
+const ART_TOP: i32 = 12;
 const FAN_BAND_TOP: i32 = 88;
 /// The clock and weather column starts here.
 const RIGHT_COLUMN_LEFT: i32 = 318;
@@ -48,6 +53,12 @@ const LEFT_PANEL_RIGHT: i32 = RIGHT_COLUMN_LEFT - 18;
 const DAYS: [&str; 7] = [
     "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche",
 ];
+
+/// Minutes and seconds, as a player writes them.
+fn clock_face(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    format!("{}:{:02}", seconds / 60, seconds % 60)
+}
 
 /// The date as the panel spells it: "Samedi 19/09/26".
 fn format_date(now: DateTime<Local>) -> String {
@@ -273,6 +284,93 @@ impl Dashboard {
         self.labelled(image, y, "Load", &load, room, |width| {
             RIGHT_COLUMN_CENTER - width / 2
         });
+    }
+
+    /// Cuts a text down until it fits `width`, ending it in an ellipsis.
+    fn shortened(&self, text: &str, size: f32, bold: bool, width: u32) -> String {
+        let scale = PxScale::from(size);
+        let font = self.font(bold);
+        if text_size(scale, font, text).0 <= width {
+            return text.to_owned();
+        }
+        let mut short: String = text.to_owned();
+        while !short.is_empty() {
+            short.pop();
+            let candidate = format!("{}…", short.trim_end());
+            if text_size(scale, font, &candidate).0 <= width {
+                return candidate;
+            }
+        }
+        String::new()
+    }
+
+    /// What is playing: cover on the left, track and progress on the right.
+    #[must_use]
+    pub fn render_player(
+        &self,
+        playing: &NowPlaying,
+        art: Option<&RgbImage>,
+        now: DateTime<Local>,
+    ) -> RgbImage {
+        let mut canvas = RgbImage::from_pixel(WIDTH, HEIGHT, BACKGROUND);
+        let image = &mut canvas;
+        let left = match art {
+            Some(art) => {
+                image::imageops::replace(image, art, i64::from(MARGIN + 4), i64::from(ART_TOP));
+                MARGIN + 4 + ART_SIZE as i32 + 16
+            }
+            None => {
+                rect(image, MARGIN + 4, ART_TOP, ART_SIZE, ART_SIZE, HEADER);
+                MARGIN + 4 + ART_SIZE as i32 + 16
+            }
+        };
+        let right = WIDTH as i32 - MARGIN;
+        let width = (right - left) as u32;
+
+        let time = now.format("%H:%M").to_string();
+        let time_width = text_size(PxScale::from(12.0), &self.regular, &time).0;
+        self.text(
+            image,
+            right - time_width as i32,
+            10,
+            12.0,
+            false,
+            MUTED,
+            &time,
+        );
+
+        let room = width - time_width - 10;
+        let title = self.shortened(&playing.track.title, 21.0, true, room);
+        self.text(image, left, 22, 21.0, true, TEXT, &title);
+        let mut line = playing.track.artist.clone();
+        if !playing.track.album.is_empty() {
+            line = format!("{line} · {}", playing.track.album);
+        }
+        let line = self.shortened(&line, 14.0, false, width);
+        self.text(image, left, 52, 14.0, false, LABEL, &line);
+
+        let bar_top = 84;
+        rect(image, left, bar_top, width, BAR_HEIGHT, TRACK);
+        if let Some(length) = playing.length.filter(|length| !length.is_zero()) {
+            let share = playing.position.as_secs_f32() / length.as_secs_f32();
+            let filled = (f32::from(u16::try_from(width).unwrap_or(u16::MAX))
+                * share.clamp(0.0, 1.0))
+            .round() as u32;
+            rect(image, left, bar_top, filled, BAR_HEIGHT, ACCENT);
+            let total = clock_face(length);
+            let total_width = text_size(PxScale::from(12.0), &self.regular, &total).0 as i32;
+            self.text(image, right - total_width, 98, 12.0, false, MUTED, &total);
+        }
+        self.text(
+            image,
+            left,
+            98,
+            12.0,
+            false,
+            MUTED,
+            &clock_face(playing.position),
+        );
+        canvas
     }
 
     /// The whole panel given over to the date and the time, for when the
