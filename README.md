@@ -10,6 +10,12 @@ current weather (Open-Meteo).
 
 ![The dashboard, drawn from made-up readings](docs/dashboard.png)
 
+While something is playing, the panel is given over to it, cover art included.
+Any player that speaks MPRIS will do — Deezer, Spotify, a browser, a local
+player:
+
+![The player screen, with cover art, title, artist and progress](docs/player.png)
+
 While the monitors are off or the session is locked, it shows the date and the
 time, and nothing else:
 

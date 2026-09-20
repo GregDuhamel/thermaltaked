@@ -26,6 +26,8 @@ pub struct Config {
     /// Show only the date and time while the monitors are off or the session
     /// is locked, instead of the dashboard.
     pub clock_when_away: bool,
+    /// Give the panel over to whatever is playing, for as long as it plays.
+    pub show_player: bool,
     pub weather: WeatherConfig,
     /// Gauge titles; whatever is left out is detected from the hardware.
     pub names: Names,
@@ -54,6 +56,7 @@ impl Default for Config {
             font_regular: "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf".into(),
             font_bold: "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf".into(),
             clock_when_away: true,
+            show_player: true,
             weather: WeatherConfig::default(),
             names: Names::default(),
             psu_rating: None,
