@@ -12,8 +12,8 @@ ab_glyph = "0.2.32"
 anyhow = "1.0.104"
 chrono = "0.4.45"
 clap = { version = "4.6.7", features = ["derive"] }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-imageproc = { version = "0.27", default-features = false, features = ["text"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+imageproc = { version = "0.27.0", default-features = false, features = ["text"] }
 indexmap = { version = "2.14.2", features = ["serde"] }
 libc = "0.2.189"
 serde = { version = "1.0.229", features = ["derive"] }
