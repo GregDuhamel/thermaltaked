@@ -423,12 +423,14 @@ impl Dashboard {
             75.0,
             90.0,
         );
+        // Junction temperature: it runs hotter than the edge, and AMD cards
+        // only reach their critical point at 110 °C.
         let gpu = temp_gauge(
             &snapshot.names.gpu,
             snapshot.gpu_temp,
             snapshot.gpu_usage,
-            80.0,
             95.0,
+            105.0,
         );
         self.gauge(image, column(0), gauge_width, &cpu);
         self.gauge(image, column(1), gauge_width, &gpu);

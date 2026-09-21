@@ -8,8 +8,8 @@ libusb or vendor software.
 
 ## What it shows
 
-The dashboard: hostname, kernel, load average, CPU and GPU temperature and
-usage, fan speeds, the power drawn from the supply, the date and time, and the
+The dashboard: hostname, kernel, load average, CPU temperature, GPU junction
+temperature, CPU and GPU usage, fan speeds, the power drawn from the supply, the date and time, and the
 current weather (Open-Meteo).
 
 ![The dashboard, drawn from made-up readings](docs/dashboard.png)

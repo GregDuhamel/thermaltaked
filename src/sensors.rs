@@ -13,7 +13,10 @@ const CPU_TEMP_SOURCES: [(&str, &str); 3] = [
 ];
 /// libdrm's table of AMD marketing names: "device id, revision, name" rows.
 const AMDGPU_IDS: &str = "/usr/share/libdrm/amdgpu.ids";
-const GPU_TEMP_SOURCES: [(&str, &str); 2] = [("amdgpu", "edge"), ("nouveau", "")];
+/// The junction is the GPU's hottest point and the one it throttles on; older
+/// AMD cards only report their edge.
+const GPU_TEMP_SOURCES: [(&str, &str); 3] =
+    [("amdgpu", "junction"), ("amdgpu", "edge"), ("nouveau", "")];
 
 #[derive(Debug)]
 pub struct Fan<'a> {
