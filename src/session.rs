@@ -84,6 +84,7 @@ fn graphical_session(connection: &Connection) -> zbus::Result<OwnedObjectPath> {
         return Ok(path);
     }
     // No session id to go by, so take this user's first graphical session.
+    // SAFETY: getuid takes no arguments and cannot fail.
     let uid = unsafe { libc::getuid() };
     let sessions: Vec<(String, u32, String, String, OwnedObjectPath)> =
         manager.call("ListSessions", &())?;

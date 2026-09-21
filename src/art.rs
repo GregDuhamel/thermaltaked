@@ -1,17 +1,26 @@
 //! Cover art, fetched off the drawing path so a slow network never holds a
 //! frame back.
 
+use std::ffi::OsString;
+use std::fs::File;
+use std::io::{Cursor, Read};
+use std::os::unix::ffi::OsStringExt;
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use image::RgbImage;
 use image::imageops::FilterType;
+use image::{ImageReader, Limits, RgbImage};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// Covers are small; anything larger is not one.
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
+/// A cover needs a few hundred kilobytes once decoded. The decoder's own
+/// default would let a malformed one claim half a gigabyte first.
+const MAX_DECODED_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SIDE: u32 = 4096;
 
 #[derive(Default)]
 struct Slot {
@@ -25,25 +34,41 @@ pub struct CoverArt {
     requests: Sender<(String, u32)>,
 }
 
+fn limits() -> Limits {
+    let mut limits = Limits::default();
+    limits.max_alloc = Some(MAX_DECODED_BYTES);
+    limits.max_image_width = Some(MAX_SIDE);
+    limits.max_image_height = Some(MAX_SIDE);
+    limits
+}
+
 fn fetch(url: &str, size: u32) -> anyhow::Result<RgbImage> {
-    let mut response = if let Some(path) = url.strip_prefix("file://") {
-        image::open(percent_decoded(path))?
+    let bytes = if let Some(path) = url.strip_prefix("file://") {
+        let mut bytes = Vec::new();
+        File::open(percent_decoded(path))?
+            .take(MAX_BYTES)
+            .read_to_end(&mut bytes)?;
+        bytes
     } else {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(TIMEOUT))
             .build()
             .into();
         let mut body = agent.get(url).call()?.into_body();
-        let bytes = body.with_config().limit(MAX_BYTES).read_to_vec()?;
-        image::load_from_memory(&bytes)?
+        body.with_config().limit(MAX_BYTES).read_to_vec()?
     };
-    response = response.resize_to_fill(size, size, FilterType::Lanczos3);
-    Ok(response.to_rgb8())
+    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    reader.limits(limits());
+    let cover = reader
+        .decode()?
+        .resize_to_fill(size, size, FilterType::Lanczos3);
+    Ok(cover.to_rgb8())
 }
 
-/// Players hand out paths with the usual URL escaping.
-fn percent_decoded(path: &str) -> String {
-    let mut out = String::with_capacity(path.len());
+/// Players hand out paths with the usual URL escaping. The escapes decode to
+/// bytes, which only make sense together: "é" is two of them.
+fn percent_decoded(path: &str) -> PathBuf {
+    let mut out = Vec::with_capacity(path.len());
     let mut bytes = path.bytes();
     while let Some(byte) = bytes.next() {
         if byte == b'%'
@@ -51,12 +76,12 @@ fn percent_decoded(path: &str) -> String {
             && let Ok(text) = std::str::from_utf8(&[high, low])
             && let Ok(decoded) = u8::from_str_radix(text, 16)
         {
-            out.push(decoded as char);
+            out.push(decoded);
         } else {
-            out.push(byte as char);
+            out.push(byte);
         }
     }
-    out
+    PathBuf::from(OsString::from_vec(out))
 }
 
 impl CoverArt {
@@ -71,7 +96,12 @@ impl CoverArt {
         let (requests, wanted) = mpsc::channel::<(String, u32)>();
         let shared = Arc::clone(&slot);
         thread::spawn(move || {
-            while let Ok((url, size)) = wanted.recv() {
+            while let Ok(mut request) = wanted.recv() {
+                // Tracks skipped in a row only want the last cover.
+                while let Ok(newer) = wanted.try_recv() {
+                    request = newer;
+                }
+                let (url, size) = request;
                 let image = fetch(&url, size)
                     .inspect_err(|error| eprintln!("cover art: {error:#}"))
                     .ok();
@@ -95,7 +125,7 @@ impl CoverArt {
     pub fn get(&self, url: &str, size: u32) -> Option<RgbImage> {
         let mut slot = self.slot.lock().unwrap();
         if slot.url != url {
-            slot.url = url.to_owned();
+            url.clone_into(&mut slot.url);
             slot.image = None;
             let _ = self.requests.send((url.to_owned(), size));
         }
@@ -115,7 +145,25 @@ mod tests {
 
     #[test]
     fn percent_escapes_come_back() {
-        assert_eq!(percent_decoded("/tmp/a%20b.jpg"), "/tmp/a b.jpg");
-        assert_eq!(percent_decoded("/plain/path.png"), "/plain/path.png");
+        let decoded = |path| {
+            percent_decoded(path)
+                .into_os_string()
+                .into_string()
+                .unwrap()
+        };
+        assert_eq!(decoded("/tmp/a%20b.jpg"), "/tmp/a b.jpg");
+        assert_eq!(decoded("/plain/path.png"), "/plain/path.png");
+    }
+
+    #[test]
+    fn accented_paths_survive() {
+        let decoded = |path| {
+            percent_decoded(path)
+                .into_os_string()
+                .into_string()
+                .unwrap()
+        };
+        assert_eq!(decoded("/music/Beyonc%C3%A9.jpg"), "/music/Beyoncé.jpg");
+        assert_eq!(decoded("/music/Beyoncé.jpg"), "/music/Beyoncé.jpg");
     }
 }

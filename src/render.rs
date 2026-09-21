@@ -55,6 +55,32 @@ const DAYS: [&str; 7] = [
     "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche",
 ];
 
+/// The longest start of `text` that `fits` once an ellipsis ends it, or the
+/// whole of it when it fits as it is. Width grows with every character kept,
+/// so a binary search finds the cut in a handful of measurements rather than
+/// one per character.
+fn shorten(text: &str, fits: impl Fn(&str) -> bool) -> String {
+    if fits(text) {
+        return text.to_owned();
+    }
+    let starts: Vec<usize> = text.char_indices().map(|(index, _)| index).collect();
+    let candidate = |kept: usize| format!("{}…", text[..starts[kept]].trim_end());
+    if !fits(&candidate(0)) {
+        return String::new();
+    }
+    // The whole text does not fit, so at most all but one character stays.
+    let (mut low, mut high) = (0, starts.len() - 1);
+    while low < high {
+        let middle = (low + high).div_ceil(2);
+        if fits(&candidate(middle)) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    candidate(low)
+}
+
 /// Minutes and seconds, as a player writes them.
 fn clock_face(duration: Duration) -> String {
     let seconds = duration.as_secs();
@@ -289,20 +315,10 @@ impl Dashboard {
 
     /// Cuts a text down until it fits `width`, ending it in an ellipsis.
     fn shortened(&self, text: &str, size: f32, bold: bool, width: u32) -> String {
-        let scale = PxScale::from(size);
-        let font = self.font(bold);
-        if text_size(scale, font, text).0 <= width {
-            return text.to_owned();
-        }
-        let mut short: String = text.to_owned();
-        while !short.is_empty() {
-            short.pop();
-            let candidate = format!("{}…", short.trim_end());
-            if text_size(scale, font, &candidate).0 <= width {
-                return candidate;
-            }
-        }
-        String::new()
+        let (scale, font) = (PxScale::from(size), self.font(bold));
+        shorten(text, |candidate| {
+            text_size(scale, font, candidate).0 <= width
+        })
     }
 
     /// What is playing: cover on the left, track and progress on the right.
@@ -488,5 +504,42 @@ impl Dashboard {
         }
 
         canvas
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ten pixels a character, so the widths are easy to reason about.
+    fn fits(width: usize) -> impl Fn(&str) -> bool {
+        move |text: &str| text.chars().count() * 10 <= width
+    }
+
+    #[test]
+    fn short_texts_are_left_alone() {
+        assert_eq!(shorten("Adagio", fits(100)), "Adagio");
+    }
+
+    #[test]
+    fn long_texts_keep_as_much_as_fits() {
+        assert_eq!(shorten("Adagio for Strings", fits(100)), "Adagio fo…");
+        // A cut on a space does not leave it dangling before the ellipsis.
+        assert_eq!(shorten("Adagio for Strings", fits(80)), "Adagio…");
+        assert_eq!(shorten("Beyoncé Knowles", fits(80)), "Beyoncé…");
+    }
+
+    #[test]
+    fn nothing_when_not_even_the_ellipsis_fits() {
+        assert_eq!(shorten("Adagio", fits(5)), "");
+    }
+
+    #[test]
+    fn the_result_never_overflows() {
+        let text = "Exploration Of Space (Cosmic Gate Remix) — Live at Ushuaïa";
+        for width in 0..700 {
+            let short = shorten(text, fits(width));
+            assert!(fits(width)(&short) || short.is_empty(), "{width}: {short}");
+        }
     }
 }

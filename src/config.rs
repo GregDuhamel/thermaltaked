@@ -114,6 +114,12 @@ impl Config {
                 config.refresh_seconds
             );
         }
+        if let Some(rating) = config.psu_rating
+            && !(rating.is_finite() && rating > 0.0)
+        {
+            eprintln!("psu_rating {rating} is not a wattage, reading the model name instead");
+            config.psu_rating = None;
+        }
         Ok(config)
     }
 }
@@ -134,6 +140,16 @@ mod tests {
         assert_eq!(refresh("refresh_seconds = -3.0"), MIN_REFRESH_SECONDS);
         assert_eq!(refresh("refresh_seconds = nan"), DEFAULT_REFRESH_SECONDS);
         assert_eq!(refresh(""), DEFAULT_REFRESH_SECONDS);
+    }
+
+    #[test]
+    fn psu_rating_must_be_a_wattage() {
+        let rating = |text: &str| Config::parse(text).unwrap().psu_rating;
+        assert_eq!(rating("psu_rating = 850"), Some(850.0));
+        assert_eq!(rating("psu_rating = 0"), None);
+        assert_eq!(rating("psu_rating = -500"), None);
+        assert_eq!(rating("psu_rating = inf"), None);
+        assert_eq!(rating(""), None);
     }
 
     #[test]
