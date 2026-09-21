@@ -1,6 +1,6 @@
 [package]
 name = "thermaltaked"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 description = "Driver and dashboard daemon for the Thermaltake 3.9\" bar LCD (264a:233d) on Linux"
 repository = "https://github.com/GregDuhamel/thermaltaked"
