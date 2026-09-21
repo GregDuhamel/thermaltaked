@@ -53,10 +53,16 @@ fn text(metadata: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
     (!joined.is_empty()).then(|| joined.join(", "))
 }
 
+/// MPRIS asks for signed microseconds, but some players send unsigned ones.
+fn duration(value: &OwnedValue) -> Option<Duration> {
+    if let Ok(micros) = value.downcast_ref::<i64>() {
+        return u64::try_from(micros).ok().map(Duration::from_micros);
+    }
+    value.downcast_ref::<u64>().ok().map(Duration::from_micros)
+}
+
 fn micros(metadata: &HashMap<String, OwnedValue>, key: &str) -> Option<Duration> {
-    let value = metadata.get(key)?;
-    let micros = value.downcast_ref::<i64>().ok()?;
-    u64::try_from(micros).ok().map(Duration::from_micros)
+    duration(metadata.get(key)?)
 }
 
 /// Reads the session bus for a player that is playing. Built once, then asked
@@ -142,20 +148,65 @@ fn now_playing(connection: &Connection) -> zbus::Result<Option<NowPlaying>> {
             .get("Metadata")
             .and_then(|value| HashMap::<String, OwnedValue>::try_from(value.clone()).ok())
             .unwrap_or_default();
-        let position = all
-            .get("Position")
-            .and_then(|value| value.downcast_ref::<i64>().ok())
-            .unwrap_or_default();
+        // Some browser tabs play without saying what: nothing worth the panel.
+        let Some(title) = text(&metadata, "xesam:title").filter(|title| !title.is_empty()) else {
+            continue;
+        };
         return Ok(Some(NowPlaying {
             track: Track {
-                title: text(&metadata, "xesam:title").unwrap_or_default(),
+                title,
                 artist: text(&metadata, "xesam:artist").unwrap_or_default(),
                 album: text(&metadata, "xesam:album").unwrap_or_default(),
                 art_url: text(&metadata, "mpris:artUrl"),
             },
-            position: Duration::from_micros(position.try_into().unwrap_or_default()),
+            position: all.get("Position").and_then(duration).unwrap_or_default(),
             length: micros(&metadata, "mpris:length"),
         }));
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zbus::zvariant::Value;
+
+    fn metadata(entries: Vec<(&str, Value<'_>)>) -> HashMap<String, OwnedValue> {
+        entries
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.try_to_owned().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn titles_and_artists_are_read() {
+        let metadata = metadata(vec![
+            ("xesam:title", Value::from("Adagio for Strings")),
+            ("xesam:artist", Value::from(vec!["Tiësto", "Someone Else"])),
+        ]);
+        assert_eq!(
+            text(&metadata, "xesam:title").as_deref(),
+            Some("Adagio for Strings")
+        );
+        assert_eq!(
+            text(&metadata, "xesam:artist").as_deref(),
+            Some("Tiësto, Someone Else")
+        );
+        assert_eq!(text(&metadata, "xesam:album"), None);
+    }
+
+    #[test]
+    fn lengths_come_signed_or_not() {
+        let metadata = metadata(vec![
+            ("signed", Value::from(418_000_000_i64)),
+            ("unsigned", Value::from(418_000_000_u64)),
+            ("negative", Value::from(-1_i64)),
+        ]);
+        assert_eq!(micros(&metadata, "signed"), Some(Duration::from_secs(418)));
+        assert_eq!(
+            micros(&metadata, "unsigned"),
+            Some(Duration::from_secs(418))
+        );
+        assert_eq!(micros(&metadata, "negative"), None);
+    }
 }
