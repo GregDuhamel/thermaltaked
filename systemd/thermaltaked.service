@@ -1,5 +1,10 @@
+# Starts with the graphical session rather than with the user manager: before
+# it, the panel's hidraw nodes still belong to root, logind has no session to
+# report a lock on, and the network may not resolve names yet. PartOf stops it
+# again when the session ends and the panel goes out of reach.
 [Unit]
 Description=Thermaltake LCD dashboard
+PartOf=graphical-session.target
 After=graphical-session.target
 
 [Service]
@@ -8,4 +13,4 @@ Restart=on-failure
 RestartSec=5
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
