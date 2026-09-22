@@ -63,6 +63,10 @@ cp systemd/thermaltaked.service ~/.config/systemd/user/
 systemctl --user enable --now thermaltaked
 ```
 
+It starts with the graphical session, once the panel is the user's to open,
+and stops with it. That takes a desktop which reaches `graphical-session.target`,
+as GNOME and Plasma do; elsewhere, set `WantedBy=default.target` instead.
+
 ## Usage
 
 ```sh
