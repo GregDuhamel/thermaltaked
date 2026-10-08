@@ -27,6 +27,15 @@ pub enum LcdError {
     Encode(#[from] image::ImageError),
 }
 
+impl LcdError {
+    /// True when the panel is gone for good rather than slow to answer; see
+    /// [`DeviceError::is_gone`].
+    #[must_use]
+    pub fn is_gone(&self) -> bool {
+        matches!(self, Self::Device(error) if error.is_gone())
+    }
+}
+
 struct Heartbeat {
     stop: Sender<()>,
     thread: JoinHandle<()>,
@@ -98,7 +107,12 @@ impl Lcd {
             while stopped.recv_timeout(HEARTBEAT_INTERVAL) == Err(RecvTimeoutError::Timeout) {
                 let command = command.lock().unwrap_or_else(PoisonError::into_inner);
                 if let Err(error) = command.send(&protocol::heartbeat()) {
-                    eprintln!("heartbeat stopped: {error}");
+                    let why = if error.is_gone() {
+                        "the LCD is unplugged"
+                    } else {
+                        "the LCD stopped taking it"
+                    };
+                    eprintln!("heartbeat stopped, {why}: {error}");
                     return;
                 }
                 let _ = command.wait_reply(REPLY_TIMEOUT);

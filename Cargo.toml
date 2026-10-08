@@ -1,6 +1,6 @@
 [package]
 name = "thermaltaked"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 # let-chains, used throughout, landed in 1.88.
 rust-version = "1.88"
@@ -16,8 +16,12 @@ chrono = "0.4.45"
 clap = { version = "4.6.7", features = ["derive"] }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 imageproc = { version = "0.27.0", default-features = false, features = ["text"] }
+# The hidraw transport: sysfs discovery, output reports, poll with timeout,
+# and telling an unplugged panel from a transient error. Not on crates.io.
+hidraw = { git = "https://github.com/GregDuhamel/hidraw", tag = "v0.1.0" }
 indexmap = { version = "2.14.2", features = ["serde"] }
-libc = "0.2.189"
+# `getuid(2)`, which std does not wrap, to find this user's logind session.
+rustix = { version = "1.1.5", features = ["process"] }
 serde = { version = "1.0.229", features = ["derive"] }
 signal-hook = "0.4.4"
 thiserror = "2.0.20"
@@ -37,7 +41,8 @@ lto = "thin"
 panic = "abort"
 
 [lints.rust]
-unsafe_code = "warn" # deny once the libc calls have moved to rustix
+# The system calls go through hidraw and rustix, which wrap them safely.
+unsafe_code = "deny"
 
 # The crate is a library with a binary on top, so its public API is held to
 # the pedantic set, which keeps it documented as one.

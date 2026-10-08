@@ -76,8 +76,6 @@ pub struct Screens {
     complained: bool,
 }
 
-// getuid(2) has no safe wrapper in std; rustix would offer one.
-#[allow(unsafe_code)]
 fn graphical_session(connection: &Connection) -> zbus::Result<OwnedObjectPath> {
     let manager = Proxy::new(connection, LOGIND, MANAGER_PATH, MANAGER)?;
     if let Ok(id) = env::var("XDG_SESSION_ID")
@@ -86,8 +84,7 @@ fn graphical_session(connection: &Connection) -> zbus::Result<OwnedObjectPath> {
         return Ok(path);
     }
     // No session id to go by, so take this user's first graphical session.
-    // SAFETY: getuid takes no arguments and cannot fail.
-    let uid = unsafe { libc::getuid() };
+    let uid = rustix::process::getuid().as_raw();
     let sessions: Vec<(String, u32, String, String, OwnedObjectPath)> =
         manager.call("ListSessions", &())?;
     sessions

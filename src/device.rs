@@ -1,11 +1,18 @@
-//! hidraw access: locating the panel's two interfaces through sysfs and
-//! exchanging raw reports with them.
+//! The panel's two hidraw interfaces: finding them and exchanging raw reports
+//! with them.
+//!
+//! The transport is the [`hidraw`] crate: it lists the nodes through sysfs,
+//! sends output reports, waits for input with a timeout, and tells an
+//! unplugged device from a transfer that merely failed. What is here is the
+//! panel's side of it: which nodes are its two interfaces, the report-ID byte
+//! its reports start with, and that its replies are acknowledgements whose
+//! content nothing reads.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
-use std::os::fd::AsRawFd;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::io;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use hidraw::{Bus, Device, Filter};
 
 use crate::protocol::{FRAME_PACKET_SIZE, PRODUCT_ID, VENDOR_ID};
 
@@ -25,51 +32,51 @@ pub enum DeviceError {
     Io(#[from] io::Error),
 }
 
+impl DeviceError {
+    /// True when the panel is gone for good - unplugged, or its node taken
+    /// away - rather than slow to answer or busy, which is worth another try.
+    #[must_use]
+    pub fn is_gone(&self) -> bool {
+        match self {
+            Self::Open { source, .. } | Self::Io(source) => hidraw::is_gone(source),
+            Self::NotFound(_) | Self::Timeout(_) => false,
+        }
+    }
+}
+
 /// One hidraw node belonging to the panel.
-#[derive(Debug)]
+///
+/// The panel is a USB device, so every node of its has an interface number;
+/// [`hidraw::Node`] carries it as an option, and this is the same node with
+/// that settled.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HidrawNode {
     pub path: PathBuf,
     pub interface: u8,
 }
 
-fn read_hex(path: &Path) -> Option<u32> {
-    u32::from_str_radix(fs::read_to_string(path).ok()?.trim(), 16).ok()
-}
-
-/// Walks up from the hidraw sysfs node to the USB interface directory, whose
-/// parent is the USB device carrying idVendor/idProduct.
-fn usb_identity(sys_hidraw: &Path) -> Option<(u32, u32, u8)> {
-    let device = fs::canonicalize(sys_hidraw.join("device")).ok()?;
-    let interface_dir = device
-        .ancestors()
-        .find(|dir| dir.join("bInterfaceNumber").exists())?;
-    let usb_device = interface_dir.parent()?;
-    Some((
-        read_hex(&usb_device.join("idVendor"))?,
-        read_hex(&usb_device.join("idProduct"))?,
-        u8::try_from(read_hex(&interface_dir.join("bInterfaceNumber"))?).ok()?,
-    ))
-}
-
-/// Lists the panel's hidraw nodes without opening them.
+/// Lists the panel's hidraw nodes without opening them, in interface order.
+///
+/// The panel is looked for on USB only: the same vendor and product IDs on
+/// any other bus would be something else wearing them.
 ///
 /// # Errors
 ///
 /// When `/sys/class/hidraw` cannot be listed.
 pub fn discover() -> io::Result<Vec<HidrawNode>> {
-    let mut nodes = Vec::new();
-    for entry in fs::read_dir("/sys/class/hidraw")? {
-        let entry = entry?;
-        if let Some((vendor, product, interface)) = usb_identity(&entry.path())
-            && vendor == u32::from(VENDOR_ID)
-            && product == u32::from(PRODUCT_ID)
-        {
-            nodes.push(HidrawNode {
-                path: Path::new("/dev").join(entry.file_name()),
-                interface,
-            });
-        }
-    }
+    let filter = Filter::new()
+        .bus(Bus::Usb)
+        .vendor(VENDOR_ID)
+        .product(PRODUCT_ID);
+    let mut nodes: Vec<HidrawNode> = hidraw::discover(&filter)?
+        .into_iter()
+        .filter_map(|node| {
+            Some(HidrawNode {
+                interface: node.interface?,
+                path: node.path,
+            })
+        })
+        .collect();
     nodes.sort_by_key(|node| node.interface);
     Ok(nodes)
 }
@@ -77,7 +84,7 @@ pub fn discover() -> io::Result<Vec<HidrawNode>> {
 /// An open hidraw interface.
 #[derive(Debug)]
 pub struct Channel {
-    file: File,
+    device: Device,
 }
 
 impl Channel {
@@ -90,15 +97,11 @@ impl Channel {
             .iter()
             .find(|node| node.interface == interface)
             .ok_or(DeviceError::NotFound(interface))?;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&node.path)
-            .map_err(|source| DeviceError::Open {
-                path: node.path.clone(),
-                source,
-            })?;
-        Ok(Self { file })
+        let device = Device::open(&node.path).map_err(|source| DeviceError::Open {
+            path: node.path.clone(),
+            source,
+        })?;
+        Ok(Self { device })
     }
 
     /// Sends one output report. The panel uses no report IDs, so hidraw wants
@@ -114,58 +117,21 @@ impl Channel {
             .get_mut(..=payload.len())
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
         report[1..].copy_from_slice(payload);
-        (&self.file).write_all(report)?;
-        Ok(())
+        Ok(self.device.write(report)?)
     }
 
-    /// One `poll(2)` for input, taken up again with whatever time is left
-    /// when a signal cuts it short.
-    // poll(2) has no safe wrapper in std; rustix would offer one.
-    #[allow(unsafe_code)]
-    fn readable(&self, timeout: Duration) -> io::Result<bool> {
-        let deadline = Instant::now() + timeout;
-        let mut remaining = timeout;
-        loop {
-            let mut pollfd = libc::pollfd {
-                fd: self.file.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            // Rounded up: a sub-millisecond remainder must sleep, not spin.
-            let millis =
-                i32::try_from(remaining.as_nanos().div_ceil(1_000_000)).unwrap_or(i32::MAX);
-            // SAFETY: pollfd is a valid, exclusively borrowed array of length 1.
-            match unsafe { libc::poll(&raw mut pollfd, 1, millis) } {
-                -1 => {
-                    let error = io::Error::last_os_error();
-                    if error.kind() != io::ErrorKind::Interrupted {
-                        return Err(error);
-                    }
-                    remaining = deadline.saturating_duration_since(Instant::now());
-                }
-                0 => return Ok(false),
-                _ => return Ok(true),
-            }
-        }
-    }
-
-    /// Reads one input report and throws it away: the panel's replies are
-    /// acknowledgements whose content nothing uses.
-    fn skip_report(&self) -> io::Result<()> {
-        let mut buffer = [0u8; MAX_REPORT_SIZE];
-        (&self.file).read(&mut buffer).map(drop)
-    }
-
-    /// Waits for the panel to acknowledge the last report.
+    /// Waits for the panel to acknowledge the last report, and throws the
+    /// acknowledgement away: its content is not used for anything.
     ///
     /// # Errors
     ///
     /// When nothing arrives within `timeout`, or the read fails.
     pub fn wait_reply(&self, timeout: Duration) -> Result<(), DeviceError> {
-        if !self.readable(timeout)? {
-            return Err(DeviceError::Timeout(timeout));
+        let mut buffer = [0u8; MAX_REPORT_SIZE];
+        match self.device.read_timeout(&mut buffer, timeout)? {
+            Some(_) => Ok(()),
+            None => Err(DeviceError::Timeout(timeout)),
         }
-        Ok(self.skip_report()?)
     }
 
     /// Discards pending input reports so the next `wait_reply` sees a fresh one.
@@ -174,9 +140,119 @@ impl Channel {
     ///
     /// When a read fails.
     pub fn drain(&self) -> Result<(), DeviceError> {
-        while self.readable(Duration::ZERO)? {
-            self.skip_report()?;
-        }
+        self.device.drain()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::net::UnixDatagram;
+    use std::path::Path;
+
+    use super::*;
+
+    fn nodes() -> Vec<HidrawNode> {
+        vec![
+            HidrawNode {
+                path: PathBuf::from("/nonexistent/hidraw5"),
+                interface: 1,
+            },
+            HidrawNode {
+                path: PathBuf::from("/nonexistent/hidraw4"),
+                interface: 0,
+            },
+        ]
+    }
+
+    #[test]
+    fn a_channel_is_picked_by_interface() {
+        // The right node is chosen before it is opened: the error names the
+        // path of the interface asked for, not the first in the list.
+        match Channel::open(&nodes(), 0) {
+            Err(DeviceError::Open { path, source }) => {
+                assert_eq!(path, Path::new("/nonexistent/hidraw4"));
+                assert_eq!(source.kind(), io::ErrorKind::NotFound);
+            }
+            other => panic!("expected an open error, got {other:?}"),
+        }
+        assert!(matches!(
+            Channel::open(&nodes(), 2),
+            Err(DeviceError::NotFound(2))
+        ));
+        assert!(matches!(
+            Channel::open(&[], 0),
+            Err(DeviceError::NotFound(0))
+        ));
+    }
+
+    /// A datagram socket pair stands in for the node: like hidraw, it
+    /// delivers one message per read.
+    fn fake() -> (Channel, UnixDatagram) {
+        let (node, peer) = UnixDatagram::pair().unwrap();
+        let channel = Channel {
+            device: Device::from_fd(node, "/dev/hidraw-fake"),
+        };
+        (channel, peer)
+    }
+
+    #[test]
+    fn a_report_goes_out_behind_a_zero_report_id() {
+        let (channel, peer) = fake();
+        channel.send(&[0x85, 0x01, 0x00, 0x80]).unwrap();
+        let mut received = [0u8; 8];
+        assert_eq!(peer.recv(&mut received).unwrap(), 5);
+        assert_eq!(received[..5], [0, 0x85, 0x01, 0x00, 0x80]);
+
+        // One report at most; the panel's largest one still fits.
+        channel.send(&[0; FRAME_PACKET_SIZE]).unwrap();
+        let too_large = channel.send(&[0; FRAME_PACKET_SIZE + 1]).unwrap_err();
+        assert!(
+            matches!(too_large, DeviceError::Io(ref error) if error.kind() == io::ErrorKind::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn a_reply_is_waited_for_and_thrown_away() {
+        let (channel, peer) = fake();
+        let timeout = Duration::from_millis(5);
+        assert!(matches!(
+            channel.wait_reply(timeout),
+            Err(DeviceError::Timeout(elapsed)) if elapsed == timeout
+        ));
+
+        peer.send(&[0x85, 0x01]).unwrap();
+        channel.wait_reply(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            channel.wait_reply(Duration::ZERO),
+            Err(DeviceError::Timeout(_))
+        ));
+
+        // Whatever is queued is not the reply to what comes next.
+        for _ in 0..3 {
+            peer.send(&[0x82]).unwrap();
+        }
+        channel.drain().unwrap();
+        assert!(matches!(
+            channel.wait_reply(Duration::ZERO),
+            Err(DeviceError::Timeout(_))
+        ));
+    }
+
+    #[test]
+    fn only_an_unplugged_panel_is_gone() {
+        let enodev = rustix::io::Errno::NODEV.raw_os_error();
+        assert!(DeviceError::Io(io::Error::from_raw_os_error(enodev)).is_gone());
+        assert!(
+            DeviceError::Open {
+                path: PathBuf::from("/dev/hidraw4"),
+                source: io::Error::from_raw_os_error(enodev),
+            }
+            .is_gone()
+        );
+        // Slow, busy or absent at startup: worth another try.
+        assert!(!DeviceError::Timeout(Duration::from_secs(2)).is_gone());
+        assert!(!DeviceError::NotFound(1).is_gone());
+        assert!(!DeviceError::Io(io::Error::from(io::ErrorKind::PermissionDenied)).is_gone());
     }
 }

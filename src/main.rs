@@ -277,16 +277,21 @@ fn run(config: &Config) -> anyhow::Result<()> {
                 (None, ScreenState::Awake) => scene.dashboard_frame(now),
                 (None, _) => scene.clock_frame(now),
             };
-            // A heartbeat the panel stopped taking is as good as a failed upload.
-            let sent = if connected.heartbeat_stopped() {
-                Err("the heartbeat stopped".to_owned())
+            // A heartbeat the panel stopped taking is as good as a failed
+            // upload. Either way the panel is let go of and opened again: an
+            // unplugged one is found again once it is back, and one that
+            // merely stopped answering is woken by a new handshake.
+            let lost = if connected.heartbeat_stopped() {
+                Some("LCD lost: the heartbeat stopped".to_owned())
             } else {
-                connected
-                    .send_frame(&frame)
-                    .map_err(|error| format!("{error:#}"))
+                match connected.send_frame(&frame) {
+                    Ok(()) => None,
+                    Err(error) if error.is_gone() => Some(format!("LCD unplugged: {error}")),
+                    Err(error) => Some(format!("LCD lost: {error}")),
+                }
             };
-            if let Err(error) = sent {
-                eprintln!("LCD lost: {error}");
+            if let Some(message) = lost {
+                eprintln!("{message}");
                 lcd = None;
                 pause = RECONNECT_DELAY;
             }
