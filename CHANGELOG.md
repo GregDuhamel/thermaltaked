@@ -5,6 +5,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-10-09
+
+The release binary runs on any x86_64 distribution, and the pieces install
+with `make`.
+
+### Changed
+
+- The Release workflow builds for `x86_64-unknown-linux-musl`: the binary is
+  statically linked and no longer tied to the runner's glibc, which kept it
+  off Debian 12 and Ubuntu 22.04. The workflow checks that the binary has no
+  dynamic loader and no shared library, starts it, and has it draw a frame,
+  before tagging. The tests run under musl too.
+- The service unit runs `/usr/local/bin/thermaltaked`, where the other
+  daemons of this machine live, with the `~/.cargo/bin` line kept as a
+  comment for `cargo install`.
+- The README's setup goes through the Makefile, with the release binary
+  beside it and `cargo install` as the alternative.
+
+### Added
+
+- `SHA256SUMS` beside the release assets, checked with
+  `sha256sum --check --ignore-missing`.
+- A Makefile: `build`, `check` (what CI runs), `install` and `uninstall`
+  (root, `/usr/local/bin`), `install-udev` and `uninstall-udev` (root),
+  `install-unit` and `uninstall-unit` (as yourself; a running service is
+  restarted), `install-config` (as yourself; an existing file is kept) and
+  `clean`. Each target refuses to run as the wrong user, and cargo never
+  runs under sudo.
+
 ## [0.6.0] - 2026-10-09
 
 D-Bus leaves the drawing path, the hwmon tree is walked again when it
@@ -111,6 +140,7 @@ timeouts.
 Releases before 0.4.0 are described on their
 [GitHub releases](https://github.com/GregDuhamel/thermaltaked/releases).
 
+[0.6.1]: https://github.com/GregDuhamel/thermaltaked/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/GregDuhamel/thermaltaked/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/GregDuhamel/thermaltaked/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/GregDuhamel/thermaltaked/compare/v0.3.5...v0.4.0

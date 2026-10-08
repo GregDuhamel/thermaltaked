@@ -8,10 +8,11 @@ PartOf=graphical-session.target
 After=graphical-session.target
 
 [Service]
-# Where `cargo install` puts the binary. For the release binary, dropped in
-# ~/.local/bin, use this line instead:
-# ExecStart=%h/.local/bin/thermaltaked run
-ExecStart=%h/.cargo/bin/thermaltaked run
+# Where `make install` and the release binary go, beside the other daemons of
+# this machine. For a binary that `cargo install` put in ~/.cargo/bin, use
+# this line instead:
+# ExecStart=%h/.cargo/bin/thermaltaked run
+ExecStart=/usr/local/bin/thermaltaked run
 # Log level: info, debug or trace, or per module (thermaltaked::player=debug).
 # The lines carry journald priorities, so `journalctl --user -u thermaltaked
 # -p warning` shows only what went wrong.

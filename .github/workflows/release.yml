@@ -2,8 +2,20 @@ name: Release
 
 # Tags and publishes whatever version Cargo.toml carries. Bumping that version
 # is an ordinary pull request, since main takes no direct pushes.
+#
+# The binary is built for x86_64-unknown-linux-musl and linked statically, so
+# it runs on any x86_64 distribution whatever its glibc: a build on the
+# runner's own glibc (2.39 on ubuntu-24.04) would refuse to start on Debian 12
+# or Ubuntu 22.04. Every dependency is pure Rust except `ring`, whose C and
+# assembly `musl-gcc` compiles; the binary opens nothing but files, sockets
+# and D-Bus, so musl's libc is all it needs from the system. Fonts stay the
+# distribution's, as before. The fallback, were this target ever to break,
+# is a dynamic build inside an `ubuntu:22.04` container (glibc 2.35).
 on:
   workflow_dispatch:
+
+env:
+  TARGET: x86_64-unknown-linux-musl
 
 jobs:
   release:
@@ -30,17 +42,50 @@ jobs:
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
+      # musl-tools brings musl-gcc, for ring's C code; the fonts let `preview`
+      # draw a frame below, as a check that the static binary really runs.
+      - name: Install musl-gcc and DejaVu Sans
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools fonts-dejavu-core
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
 
       - name: Cache
         uses: Swatinem/rust-cache@v2
 
+      # The tests run under musl too, so what is published is what was tested.
       - name: cargo test
-        run: cargo test --locked --all-targets
+        run: cargo test --locked --all-targets --target "$TARGET"
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
 
       - name: cargo build --release
-        run: cargo build --locked --release
+        run: cargo build --locked --release --target "$TARGET"
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+
+      # A static-pie binary has no interpreter and no NEEDED entry; `file`
+      # alone is not relied on, since older versions call static-pie
+      # "dynamically linked".
+      - name: Check that the binary is static and starts
+        run: |
+          bin="target/$TARGET/release/thermaltaked"
+          file "$bin"
+          if readelf -lW "$bin" | grep -q 'Requesting program interpreter'; then
+            echo "the binary asks for a dynamic loader" >&2
+            exit 1
+          fi
+          if readelf -dW "$bin" | grep -q 'NEEDED'; then
+            echo "the binary needs shared libraries" >&2
+            exit 1
+          fi
+          "$bin" --help
+          "$bin" preview --clock preview.png
+          file preview.png | grep -q 'PNG image data, 480 x 128'
 
       - name: Tag the release
         run: |
@@ -49,16 +94,21 @@ jobs:
           git tag "v${{ steps.version.outputs.version }}"
           git push origin "v${{ steps.version.outputs.version }}"
 
-      - name: Rename binary
-        run: cp target/release/thermaltaked thermaltaked-x86_64-linux
+      # The assets are gathered in one flat directory, so the names in
+      # SHA256SUMS are the names of the downloads and `sha256sum -c` works
+      # on them as downloaded.
+      - name: Gather the assets and write SHA256SUMS
+        run: |
+          mkdir dist
+          cp "target/$TARGET/release/thermaltaked" dist/thermaltaked-x86_64-linux
+          cp udev/70-thermaltake-lcd.rules systemd/thermaltaked.service config.example.toml dist/
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.version.outputs.version }}
-          files: |
-            thermaltaked-x86_64-linux
-            udev/70-thermaltake-lcd.rules
-            systemd/thermaltaked.service
-            config.example.toml
+          files: dist/*
           generate_release_notes: true
