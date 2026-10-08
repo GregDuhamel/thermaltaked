@@ -697,6 +697,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hidraw"
+version = "0.1.0"
+source = "git+https://github.com/GregDuhamel/hidraw?tag=v0.1.0#385800ffbb96c788e40a57844584ea2f8b2b6c54"
+dependencies = [
+ "rustix",
+]
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1540,16 +1548,17 @@ dependencies = [
 
 [[package]]
 name = "thermaltaked"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
  "chrono",
  "clap",
+ "hidraw",
  "image",
  "imageproc",
  "indexmap",
- "libc",
+ "rustix",
  "serde",
  "serde_json",
  "signal-hook",

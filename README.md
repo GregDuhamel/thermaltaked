@@ -3,8 +3,9 @@
 [![CI](https://github.com/GregDuhamel/thermaltaked/actions/workflows/ci.yml/badge.svg)](https://github.com/GregDuhamel/thermaltaked/actions/workflows/ci.yml)
 
 Rust driver and dashboard daemon for the Thermaltake 3.9" bar LCD
-(`264a:233d`, 480x128) on Linux. It talks to the panel through hidraw, with no
-libusb or vendor software.
+(`264a:233d`, 480x128) on Linux. It talks to the panel through the kernel's
+hidraw nodes, with no libusb or vendor software, and without a line of
+`unsafe`.
 
 ## What it shows
 
@@ -55,6 +56,10 @@ cargo install --path .
 mkdir -p ~/.config/thermaltaked
 cp config.example.toml ~/.config/thermaltaked/config.toml
 ```
+
+Building takes Rust 1.88 or later. The release profile strips the binary,
+links it with thin LTO and aborts on panic, so a bug ends the process and
+systemd restarts it rather than leaving a half-dead daemon on the panel.
 
 The dashboard is drawn in DejaVu Sans, which most distributions ship
 (`dejavu-sans-fonts` on Fedora, `fonts-dejavu-core` on Debian and Ubuntu,
@@ -117,13 +122,41 @@ table. Monitors are asleep when every enabled connector under
 `LockedHint`, and the track from MPRIS on the session bus — both over D-Bus,
 and both looked up again if the bus is not there yet at boot.
 
+## How it talks to the panel
+
+The transport is the [hidraw](https://github.com/GregDuhamel/hidraw) crate,
+shared with the other daemons of this account; this project keeps only the
+panel's side of it (`src/device.rs`, `src/lcd.rs`):
+
+- `hidraw::discover` lists `/sys/class/hidraw`, keeping the nodes whose HID
+  device sits on USB with the panel's vendor and product IDs. The panel is a
+  composite device with one node per interface, and sysfs's
+  `bInterfaceNumber` tells the command interface (0) from the frame
+  interface (1). The same IDs on another bus would be something else wearing
+  them, and are left alone.
+- Each node is opened read-write, which the udev rule above allows. Every
+  report goes out as one `write(2)` with a zero report-ID byte in front, as
+  hidraw wants for a device that declares none.
+- The panel answers each command, and each frame, with an input report whose
+  content nothing reads: the daemon drains what is queued, sends, then waits
+  for the acknowledgement with `poll(2)` and a 2 s timeout, taken up again
+  with the time left when a signal cuts it short.
+- `hidraw::is_gone` tells an unplugged panel (`ENODEV` on write, `EIO` on
+  read) from a transfer that merely failed. Either way the daemon lets the
+  panel go and opens it again 3 s later - an unplugged one is found once it
+  is back, a silent one is woken by a new handshake - but the log says which.
+
+A heartbeat thread keeps the panel awake every 2 s; should it stop taking
+them, the thread ends and the main loop reconnects even before a frame fails.
+
 ## Protocol
 
 Interface 0 takes 440-byte commands `[opcode, 01, 00, 80, ...]`: a handshake
-(`85 87 85 87 84 81`), brightness (`12`, value in byte 4) and a heartbeat (`82`)
-every 2 s. Interface 1 takes a JPEG split into 1020-byte chunks, each in a
-1024-byte report: `[08, packet count, 00, 80]` for the first, `[08, index, 00,
-00]` for the rest. See `src/protocol.rs`.
+(`85 87 85 87 84 81`), brightness (`12`, value in byte 4), which follows the
+handshake straight away so the panel does not flash at its last setting, and a
+heartbeat (`82`) every 2 s. Interface 1 takes a JPEG split into 1020-byte
+chunks, each in a 1024-byte report: `[08, packet count, 00, 80]` for the
+first, `[08, index, 00, 00]` for the rest. See `src/protocol.rs`.
 
 What is known of it comes from
 [ttlcd](https://github.com/bekindpleaserewind/ttlcd),
@@ -133,7 +166,8 @@ which this project reimplements in Rust rather than copies.
 
 ## Releasing
 
-Bump `version` in `Cargo.toml` through a pull request, then run the Release
+Bump `version` in `Cargo.toml` and add the version's section to
+[CHANGELOG.md](CHANGELOG.md) through a pull request, then run the Release
 workflow: it tags that version, builds the binary and publishes it with the
 udev rule, the service unit and the example configuration.
 
