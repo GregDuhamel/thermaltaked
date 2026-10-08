@@ -1,6 +1,9 @@
 //! Driver and dashboard daemon for the Thermaltake 3.9" bar LCD (264a:233d).
 
 pub mod art;
+pub mod background;
+pub mod bus;
+pub mod complaint;
 pub mod config;
 pub mod device;
 pub mod lcd;

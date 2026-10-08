@@ -1,21 +1,44 @@
-//! What is playing, read from any MPRIS player on the session bus.
+//! What is playing, read from any MPRIS player on the session bus by a
+//! thread of its own.
+//!
+//! The thread asks the bus for its names, then every `org.mpris.MediaPlayer2.*`
+//! for all of its player properties, about once a second and sooner when a
+//! player announces a change. The drawing loop reads only what the thread
+//! last published, and moves the position along on its own between two
+//! readings, so a player that stops answering holds up at most the thread,
+//! and only for the call's timeout.
 
 use std::collections::HashMap;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::thread;
 use std::time::{Duration, Instant};
 
+use log::{debug, warn};
 use zbus::blocking::Connection;
 use zbus::blocking::fdo::PropertiesProxy;
-use zbus::fdo;
+use zbus::message::Type;
 use zbus::names::InterfaceName;
 use zbus::zvariant::OwnedValue;
+use zbus::{MatchRule, fdo};
+
+use crate::background::{Background, Publisher};
+use crate::bus;
+use crate::complaint::Complaint;
 
 const DBUS: &str = "org.freedesktop.DBus";
 const DBUS_PATH: &str = "/org/freedesktop/DBus";
+const PROPERTIES: &str = "org.freedesktop.DBus.Properties";
 const MPRIS_PREFIX: &str = "org.mpris.MediaPlayer2.";
 const MPRIS_PATH: &str = "/org/mpris/MediaPlayer2";
 const PLAYER: &str = "org.mpris.MediaPlayer2.Player";
 /// A session bus is not always there, and players come and go.
 const RETRY: Duration = Duration::from_secs(30);
+/// The position moves along without a signal to announce it, so the players
+/// are asked again this often even when none of them says anything.
+const POLL: Duration = Duration::from_secs(1);
+/// A player that let a call time out is left alone this long before it is
+/// asked again, so one frozen player does not cost every poll its timeout.
+const FROZEN_FOR: Duration = Duration::from_secs(30);
 
 /// One track, as the player describes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +56,30 @@ pub struct NowPlaying {
     pub track: Track,
     pub position: Duration,
     pub length: Option<Duration>,
+}
+
+impl NowPlaying {
+    /// The same track, `elapsed` further along: what a player at normal
+    /// speed shows that long after this reading, held at the end of the track.
+    #[must_use]
+    pub fn advanced_by(&self, elapsed: Duration) -> Self {
+        let mut position = self.position.saturating_add(elapsed);
+        if let Some(length) = self.length {
+            position = position.min(length);
+        }
+        Self {
+            track: self.track.clone(),
+            position,
+            length: self.length,
+        }
+    }
+}
+
+/// What the thread publishes: a reading and when it was taken.
+#[derive(Debug, Clone)]
+struct Reading {
+    playing: Option<NowPlaying>,
+    taken: Instant,
 }
 
 fn text_value(value: Option<&OwnedValue>) -> Option<String> {
@@ -66,61 +113,32 @@ fn micros(metadata: &HashMap<String, OwnedValue>, key: &str) -> Option<Duration>
     duration(metadata.get(key)?)
 }
 
-/// Reads the session bus for a player that is playing. Built once, then asked
-/// on every frame.
+/// The first player that is playing, as the background thread last found
+/// it. Built once, then asked on every frame without touching the bus.
 pub struct Players {
-    connection: Option<Connection>,
-    last_try: Instant,
-    complained: bool,
+    latest: Background<Reading>,
 }
 
 impl Players {
+    /// Starts the thread that watches the session bus.
     #[must_use]
     pub fn new() -> Self {
-        let mut players = Self {
-            connection: None,
-            last_try: Instant::now(),
-            complained: false,
+        let initial = Reading {
+            playing: None,
+            taken: Instant::now(),
         };
-        players.connect();
-        players
-    }
-
-    fn connect(&mut self) {
-        self.last_try = Instant::now();
-        match Connection::session() {
-            Ok(connection) => {
-                if self.complained {
-                    eprintln!("session bus reachable again");
-                }
-                self.complained = false;
-                self.connection = Some(connection);
-            }
-            Err(error) => {
-                if !self.complained {
-                    eprintln!("players unavailable: {error}");
-                    self.complained = true;
-                }
-            }
+        Self {
+            latest: Background::start("mpris", initial, |publisher| watch(&publisher)),
         }
     }
 
-    /// The first player that is playing, if any is.
+    /// The first player that is playing, if any is, with its position moved
+    /// along since the thread read it.
     #[must_use]
-    pub fn playing(&mut self) -> Option<NowPlaying> {
-        if self.connection.is_none() && self.last_try.elapsed() >= RETRY {
-            self.connect();
-        }
-        let connection = self.connection.as_ref()?;
-        match now_playing(connection) {
-            Ok(playing) => playing,
-            Err(error) => {
-                eprintln!("players lost: {error}");
-                self.connection = None;
-                self.last_try = Instant::now();
-                None
-            }
-        }
+    pub fn playing(&self) -> Option<NowPlaying> {
+        let reading = self.latest.latest();
+        let playing = reading.playing?;
+        Some(playing.advanced_by(reading.taken.elapsed()))
     }
 }
 
@@ -130,19 +148,113 @@ impl Default for Players {
     }
 }
 
-/// Whether a player's failure is really the bus going away, which is worth
-/// starting over, rather than that player leaving between `ListNames` and
-/// the call that followed it.
-fn lost_bus(error: &fdo::Error) -> bool {
-    matches!(error, fdo::Error::ZBus(zbus::Error::InputOutput(_)))
+/// `PropertiesChanged` from any player: they all live at the same path,
+/// whatever their name.
+fn changes_rule() -> zbus::Result<MatchRule<'static>> {
+    Ok(MatchRule::builder()
+        .msg_type(Type::Signal)
+        .interface(PROPERTIES)?
+        .member("PropertiesChanged")?
+        .path(MPRIS_PATH)?
+        .build())
+}
+
+/// The thread: connects, then reads the players again on every nudge and
+/// at least every [`POLL`], until the bus goes away, when it starts over.
+fn watch(publisher: &Publisher<Reading>) {
+    let mut complaint = Complaint::default();
+    while !publisher.abandoned() {
+        let connected = bus::session().and_then(|connection| {
+            let nudges = bus::nudges(&connection, changes_rule()?, "mpris-signals")?;
+            Ok((connection, nudges))
+        });
+        let (connection, nudges) = match connected {
+            Ok(connected) => connected,
+            Err(error) => {
+                complaint.raise(format!("players unavailable: {error}"));
+                thread::sleep(RETRY);
+                continue;
+            }
+        };
+        complaint.withdraw("session bus reachable again");
+        let mut frozen = Frozen::default();
+        let error = follow(&connection, &nudges, &mut frozen, publisher);
+        if publisher.abandoned() {
+            return;
+        }
+        // The reading stands until the bus is back, which could mislead:
+        // nothing plays on a bus that is not there.
+        publisher.publish(Reading {
+            playing: None,
+            taken: Instant::now(),
+        });
+        complaint.raise(format!("players lost: {error}"));
+        thread::sleep(RETRY);
+    }
+}
+
+/// Reads the players until the bus fails, and says how.
+fn follow(
+    connection: &Connection,
+    nudges: &Receiver<()>,
+    frozen: &mut Frozen,
+    publisher: &Publisher<Reading>,
+) -> zbus::Error {
+    loop {
+        match now_playing(connection, frozen) {
+            Ok(playing) => publisher.publish(Reading {
+                playing,
+                taken: Instant::now(),
+            }),
+            Err(error) => return error,
+        }
+        if publisher.abandoned() {
+            // Lets the caller wind down through its usual path.
+            return zbus::Error::Failure("nobody reads the players anymore".to_owned());
+        }
+        match nudges.recv_timeout(POLL) {
+            // A burst of changes is read once.
+            Ok(()) => while nudges.try_recv().is_ok() {},
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                return zbus::Error::Failure("the signal stream ended".to_owned());
+            }
+        }
+    }
+}
+
+/// Players that let a call time out, and when they did.
+#[derive(Default)]
+struct Frozen(HashMap<String, Instant>);
+
+impl Frozen {
+    /// Whether `name` is still being left alone.
+    fn holds(&mut self, name: &str) -> bool {
+        match self.0.get(name) {
+            Some(since) if since.elapsed() < FROZEN_FOR => true,
+            Some(_) => {
+                self.0.remove(name);
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn add(&mut self, name: String) {
+        warn!(
+            "player {name} is not answering, ignored for {}s",
+            FROZEN_FOR.as_secs()
+        );
+        self.0.insert(name, Instant::now());
+    }
 }
 
 /// Every property of the player interface, in one round trip and none of it
 /// cached: the position moves along without a signal to announce it.
-fn properties(connection: &Connection, name: String) -> fdo::Result<HashMap<String, OwnedValue>> {
+fn properties(connection: &Connection, name: &str) -> fdo::Result<HashMap<String, OwnedValue>> {
     let player = InterfaceName::from_static_str_unchecked(PLAYER);
     let properties = PropertiesProxy::builder(connection)
-        .destination(name)?
+        .destination(name.to_owned())?
         .path(MPRIS_PATH)?
         .build()?;
     properties.get_all(player)
@@ -173,15 +285,25 @@ fn playing_from(all: &HashMap<String, OwnedValue>) -> Option<NowPlaying> {
 
 /// Fails only when the bus itself is out of reach: a player that leaves
 /// between `ListNames` and its own answer is skipped, not held against the
-/// others.
-fn now_playing(connection: &Connection) -> zbus::Result<Option<NowPlaying>> {
+/// others, and one that never answers is noted and left alone for a while.
+fn now_playing(connection: &Connection, frozen: &mut Frozen) -> zbus::Result<Option<NowPlaying>> {
     let bus = zbus::blocking::Proxy::new(connection, DBUS, DBUS_PATH, DBUS)?;
     let names: Vec<String> = bus.call("ListNames", &())?;
     for name in names.into_iter().filter(|n| n.starts_with(MPRIS_PREFIX)) {
-        let all = match properties(connection, name) {
+        if frozen.holds(&name) {
+            continue;
+        }
+        let all = match properties(connection, &name) {
             Ok(all) => all,
-            Err(error) if lost_bus(&error) => return Err(error.into()),
-            Err(_) => continue,
+            Err(fdo::Error::ZBus(error)) if bus::timed_out(&error) => {
+                frozen.add(name);
+                continue;
+            }
+            Err(fdo::Error::ZBus(error)) if bus::lost(&error) => return Err(error),
+            Err(error) => {
+                debug!("player {name} skipped: {error}");
+                continue;
+            }
         };
         if let Some(playing) = playing_from(&all) {
             return Ok(Some(playing));
@@ -284,12 +406,49 @@ mod tests {
     }
 
     #[test]
-    fn only_a_dead_bus_costs_the_connection() {
-        // The player left between ListNames and GetAll: the others still count.
-        assert!(!lost_bus(&fdo::Error::ServiceUnknown("gone".to_owned())));
-        assert!(!lost_bus(&fdo::Error::UnknownInterface("none".to_owned())));
-        let broken = std::io::Error::from(std::io::ErrorKind::BrokenPipe);
-        let lost = fdo::Error::ZBus(zbus::Error::InputOutput(std::sync::Arc::new(broken)));
-        assert!(lost_bus(&lost));
+    fn the_position_moves_along_between_readings() {
+        let all = properties(
+            "Playing",
+            vec![
+                ("xesam:title", Value::from("Adagio for Strings")),
+                ("mpris:length", Value::from(100_000_000_i64)),
+            ],
+        );
+        let playing = playing_from(&all).unwrap();
+        assert_eq!(
+            playing.advanced_by(Duration::from_millis(1500)).position,
+            Duration::from_millis(98_500)
+        );
+        // Held at the end rather than running past it.
+        assert_eq!(
+            playing.advanced_by(Duration::from_secs(10)).position,
+            Duration::from_secs(100)
+        );
+        let endless = NowPlaying {
+            length: None,
+            ..playing
+        };
+        assert_eq!(
+            endless.advanced_by(Duration::from_secs(10)).position,
+            Duration::from_secs(107)
+        );
+    }
+
+    #[test]
+    fn a_frozen_player_is_left_alone_for_a_while() {
+        let mut frozen = Frozen::default();
+        assert!(!frozen.holds("org.mpris.MediaPlayer2.spotify"));
+        frozen.add("org.mpris.MediaPlayer2.spotify".to_owned());
+        assert!(frozen.holds("org.mpris.MediaPlayer2.spotify"));
+        assert!(!frozen.holds("org.mpris.MediaPlayer2.vlc"));
+        // Long enough ago to be worth another try.
+        let long_ago = Instant::now()
+            .checked_sub(FROZEN_FOR + Duration::from_secs(1))
+            .unwrap();
+        frozen
+            .0
+            .insert("org.mpris.MediaPlayer2.spotify".to_owned(), long_ago);
+        assert!(!frozen.holds("org.mpris.MediaPlayer2.spotify"));
+        assert!(frozen.0.is_empty());
     }
 }

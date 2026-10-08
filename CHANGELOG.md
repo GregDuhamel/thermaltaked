@@ -5,6 +5,49 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-10-09
+
+D-Bus leaves the drawing path, the hwmon tree is walked again when it
+changes, and the daemon logs through `log`.
+
+### Changed
+
+- The MPRIS players and logind's `LockedHint` are read by two background
+  threads, which publish their latest state for the drawing loop to read;
+  the loop no longer touches the bus. Each thread polls once a second and
+  sooner on a `PropertiesChanged` signal, and every call carries a 2 s
+  timeout. A player that keeps its name but never answers (a frozen tab, a
+  process stopped with `SIGSTOP`) costs its thread one timeout, is then left
+  alone for 30 s, and never holds a frame back; before, it froze the loop and
+  the panel fell back to its own screen. The position moves along between
+  two readings, so the progress bar keeps its pace at any refresh rate.
+- `Sensors` walks `/sys/class/hwmon` again when a reading's file is gone
+  (5 s after the last walk at the soonest) or a sensor is still missing
+  (every 30 s): amdgpu registering anew after a GPU reset or a resume, a
+  power supply plugged back in, a driver loaded after the daemon. The log
+  says what was found, moved or lost.
+- Logging goes through `log` and `env_logger`: info by default, `-v` for
+  debug and `-vv` for trace, `RUST_LOG` for anything else. Under systemd the
+  lines carry journald priorities (`<4>` for a warning) instead of
+  timestamps, and the service unit sets `RUST_LOG=info`. Reconnection
+  failures are warnings, logged once per failure and once more when it ends;
+  screen changes are info; what was found where is debug.
+- The weather thread, the cover-art thread and the two new ones share
+  `Background<T>`, and the "complain once, say when it is over" reporting
+  shares `Complaint`.
+- The text helpers of the renderer take a `TextStyle` (size, weight, color)
+  instead of three loose arguments; the frames are unchanged pixel for pixel.
+
+### Added
+
+- `Sensors::with_root`, which reads any directory laid out like
+  `/sys/class/hwmon`, and the tests that use it: fan selection and order
+  from `[fans]`, lone-fan naming, `always_shown`, the CPU, GPU and PSU names
+  and the PSU rating, the temperature sources' order, and a chip that
+  re-registers or a driver loaded late being found again.
+- `thermaltaked info` waits up to 5 s for logind's first word before
+  reporting the screen state.
+
 ## [0.5.0] - 2026-10-08
 
 The transport moved to the shared [hidraw](https://github.com/GregDuhamel/hidraw)
@@ -68,5 +111,6 @@ timeouts.
 Releases before 0.4.0 are described on their
 [GitHub releases](https://github.com/GregDuhamel/thermaltaked/releases).
 
+[0.6.0]: https://github.com/GregDuhamel/thermaltaked/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/GregDuhamel/thermaltaked/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/GregDuhamel/thermaltaked/compare/v0.3.5...v0.4.0

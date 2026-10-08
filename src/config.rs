@@ -5,6 +5,7 @@ use std::{env, fs};
 
 use anyhow::Context;
 use indexmap::IndexMap;
+use log::warn;
 use serde::Deserialize;
 
 use crate::sensors::Names;
@@ -163,7 +164,7 @@ impl Config {
         };
         // NaN is in no range, so it is reported along with the rest.
         if !(MIN_REFRESH_SECONDS..=MAX_REFRESH_SECONDS).contains(&asked) {
-            eprintln!(
+            warn!(
                 "refresh_seconds {asked} is out of reach, using {}",
                 config.refresh_seconds
             );
@@ -171,7 +172,7 @@ impl Config {
         if let Some(rating) = config.psu_rating
             && !(rating.is_finite() && rating > 0.0)
         {
-            eprintln!("psu_rating {rating} is not a wattage, reading the model name instead");
+            warn!("psu_rating {rating} is not a wattage, reading the model name instead");
             config.psu_rating = None;
         }
         Ok(config)

@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
@@ -7,10 +8,12 @@ use anyhow::Context;
 use chrono::{DateTime, Local};
 use clap::{Parser, Subcommand};
 use image::{Rgb, RgbImage};
+use log::{Level, LevelFilter, info, warn};
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 
 use thermaltaked::art::CoverArt;
+use thermaltaked::complaint::Complaint;
 use thermaltaked::config::Config;
 use thermaltaked::device;
 use thermaltaked::lcd::Lcd;
@@ -24,16 +27,24 @@ use thermaltaked::weather::WeatherFeed;
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 /// /proc/stat needs two samples before a CPU usage can be computed.
 const CPU_SAMPLE_DELAY: Duration = Duration::from_millis(250);
+/// How long a one-shot command waits for a background thread's first word.
+const FIRST_WORD: Duration = Duration::from_secs(5);
 
 #[derive(Parser)]
 #[command(
     version,
-    about = "Thermaltake 3.9\" bar LCD (264a:233d) dashboard daemon"
+    about = "Thermaltake 3.9\" bar LCD (264a:233d) dashboard daemon",
+    after_help = "Logging goes to stderr at the info level, or at the level RUST_LOG names \
+                  (RUST_LOG=debug, RUST_LOG=thermaltaked=trace); -v takes precedence over \
+                  it. Under systemd, lines carry journald priorities instead of timestamps."
 )]
 struct Cli {
     /// Defaults to ~/.config/thermaltaked/config.toml when it exists.
     #[arg(long, global = true)]
     config: Option<PathBuf>,
+    /// Log more: -v for debug, -vv for trace (this crate only).
+    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
+    verbose: u8,
     #[command(subcommand)]
     command: Command,
 }
@@ -59,8 +70,53 @@ enum Command {
     Run,
 }
 
+/// The `<N>` journald reads a priority from at the start of a stderr line,
+/// as `sd-daemon(3)` numbers them.
+const fn journal_priority(level: Level) -> u8 {
+    match level {
+        Level::Error => 3,
+        Level::Warn => 4,
+        Level::Info => 6,
+        Level::Debug | Level::Trace => 7,
+    }
+}
+
+/// Sets logging up: info by default, what `RUST_LOG` says otherwise, and
+/// what `-v` says above all. Under systemd, whose journal timestamps every
+/// line already, the lines carry its priority prefix instead.
+fn init_logging(verbose: u8) {
+    let mut builder = env_logger::Builder::new();
+    builder.filter_level(LevelFilter::Info);
+    match verbose {
+        0 => {
+            builder.parse_default_env();
+        }
+        1 => {
+            builder.filter_module(env!("CARGO_CRATE_NAME"), LevelFilter::Debug);
+        }
+        _ => {
+            builder.filter_module(env!("CARGO_CRATE_NAME"), LevelFilter::Trace);
+        }
+    }
+    if std::env::var_os("JOURNAL_STREAM").is_some() {
+        builder.format(|out, record| {
+            writeln!(
+                out,
+                "<{}>{}",
+                journal_priority(record.level()),
+                record.args()
+            )
+        });
+    }
+    builder.init();
+}
+
 fn info() -> anyhow::Result<()> {
-    println!("screens: {}", Screens::new().state().label());
+    let screens = Screens::new();
+    if !screens.wait_ready(FIRST_WORD) {
+        warn!("logind did not answer in time, the lock state is a guess");
+    }
+    println!("screens: {}", screens.state().label());
     let nodes = device::discover()?;
     if nodes.is_empty() {
         anyhow::bail!("Thermaltake LCD {VENDOR_ID:04x}:{PRODUCT_ID:04x} not found");
@@ -171,14 +227,10 @@ fn preview(config: &Config, output: &Path, clock: bool) -> anyhow::Result<()> {
     }
     scene.dashboard_frame(Local::now());
     // Leaves the weather thread a chance to answer.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while scene
-        .weather
-        .as_ref()
-        .is_some_and(|feed| feed.latest().is_none())
-        && Instant::now() < deadline
+    if let Some(weather) = &scene.weather
+        && !weather.wait_ready(FIRST_WORD)
     {
-        thread::sleep(CPU_SAMPLE_DELAY);
+        warn!("no weather yet, the frame goes without");
     }
     thread::sleep(CPU_SAMPLE_DELAY);
     scene
@@ -215,15 +267,18 @@ fn describe(state: ScreenState) -> String {
     format!("{}: drawing {drawing}", state.label())
 }
 
+/// The drawing loop. Everything it reads is at hand: sysfs and /proc
+/// directly, the bus, the network and the lock through what their threads
+/// last published. Only the panel itself is waited on, with a timeout.
 fn run(config: &Config) -> anyhow::Result<()> {
     let stopped = stop_requests()?;
-    let mut screens = Screens::new();
+    let screens = Screens::new();
     let refresh = Duration::from_secs_f32(config.refresh_seconds);
     let mut scene = Scene::new(config)?;
     let mut lcd = None;
     // The panel is out of reach until its udev rule grants this session access,
     // which can be a while after boot, so the same complaint is logged once.
-    let mut complaint = None;
+    let mut complaint = Complaint::default();
     let mut shown = None;
 
     loop {
@@ -232,16 +287,12 @@ fn run(config: &Config) -> anyhow::Result<()> {
         if lcd.is_none() {
             match connect(config.brightness) {
                 Ok(connected) => {
-                    eprintln!("LCD connected");
-                    complaint = None;
+                    complaint.clear();
+                    info!("LCD connected");
                     lcd = Some(connected);
                 }
                 Err(error) => {
-                    let error = format!("LCD unavailable: {error:#}");
-                    if complaint.as_ref() != Some(&error) {
-                        eprintln!("{error}");
-                        complaint = Some(error);
-                    }
+                    complaint.raise(format!("LCD unavailable: {error:#}"));
                     pause = RECONNECT_DELAY;
                 }
             }
@@ -265,7 +316,7 @@ fn run(config: &Config) -> anyhow::Result<()> {
             None => describe(state),
         };
         if shown.as_ref() != Some(&showing) {
-            eprintln!("{showing}");
+            info!("{showing}");
             shown = Some(showing);
         }
 
@@ -291,7 +342,7 @@ fn run(config: &Config) -> anyhow::Result<()> {
                 }
             };
             if let Some(message) = lost {
-                eprintln!("{message}");
+                warn!("{message}");
                 lcd = None;
                 pause = RECONNECT_DELAY;
             }
@@ -300,6 +351,7 @@ fn run(config: &Config) -> anyhow::Result<()> {
         // Sleeps until the next frame is due, unless a signal asks to stop.
         let remaining = pause.saturating_sub(started.elapsed());
         if stopped.recv_timeout(remaining) != Err(RecvTimeoutError::Timeout) {
+            info!("stopping");
             return Ok(());
         }
     }
@@ -307,6 +359,7 @@ fn run(config: &Config) -> anyhow::Result<()> {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    init_logging(cli.verbose);
     let config = Config::load(cli.config.as_deref())?;
     match cli.command {
         Command::Info => info(),
