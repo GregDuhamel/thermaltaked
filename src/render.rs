@@ -108,6 +108,19 @@ fn format_date(now: DateTime<Local>) -> String {
     format!("{day} {}", now.format("%d/%m/%y"))
 }
 
+/// How a piece of text is drawn: its size in pixels, weight and color.
+#[derive(Debug, Clone, Copy)]
+struct TextStyle {
+    size: f32,
+    bold: bool,
+    color: Rgb<u8>,
+}
+
+/// A style, spelled short enough to sit in a call.
+const fn style(size: f32, bold: bool, color: Rgb<u8>) -> TextStyle {
+    TextStyle { size, bold, color }
+}
+
 /// One dashboard column: a title, a big value and a usage bar.
 struct Gauge<'a> {
     title: &'a str,
@@ -143,8 +156,6 @@ fn rect(image: &mut RgbImage, x: i32, y: i32, width: u32, height: u32, color: Rg
     }
 }
 
-// Drawing helpers take position, style and content as flat arguments.
-#[allow(clippy::too_many_arguments)]
 impl Dashboard {
     /// # Errors
     ///
@@ -160,60 +171,39 @@ impl Dashboard {
         if bold { &self.bold } else { &self.regular }
     }
 
-    fn text(
-        &self,
-        image: &mut RgbImage,
-        x: i32,
-        y: i32,
-        size: f32,
-        bold: bool,
-        color: Rgb<u8>,
-        text: &str,
-    ) -> i32 {
-        let font = self.font(bold);
-        draw_text_mut(image, color, x, y, PxScale::from(size), font, text);
-        x + text_size(PxScale::from(size), font, text).0 as i32
+    /// The width of `text` drawn in `style`.
+    fn width(&self, style: TextStyle, text: &str) -> i32 {
+        text_size(PxScale::from(style.size), self.font(style.bold), text).0 as i32
     }
 
+    /// Draws `text` with its left edge at `x`, and returns where it ends.
+    fn text(&self, image: &mut RgbImage, x: i32, y: i32, style: TextStyle, text: &str) -> i32 {
+        let scale = PxScale::from(style.size);
+        draw_text_mut(image, style.color, x, y, scale, self.font(style.bold), text);
+        x + self.width(style, text)
+    }
+
+    /// Draws `text` centered on `center`.
     fn text_centered(
         &self,
         image: &mut RgbImage,
         center: i32,
         y: i32,
-        size: f32,
-        bold: bool,
-        color: Rgb<u8>,
+        style: TextStyle,
         text: &str,
     ) {
-        let font = self.font(bold);
-        let width = text_size(PxScale::from(size), font, text).0 as i32;
-        draw_text_mut(
-            image,
-            color,
-            center - width / 2,
-            y,
-            PxScale::from(size),
-            font,
-            text,
-        );
+        let x = center - self.width(style, text) / 2;
+        self.text(image, x, y, style, text);
     }
 
     /// A big number and its small unit, centered together on `center`.
     fn value(&self, image: &mut RgbImage, center: i32, color: Rgb<u8>, number: &str, unit: &str) {
         const UNIT_GAP: i32 = 2;
-        let number_width = text_size(PxScale::from(32.0), &self.bold, number).0 as i32;
-        let unit_width = text_size(PxScale::from(15.0), &self.regular, unit).0 as i32;
-        let x = center - (number_width + UNIT_GAP + unit_width) / 2;
-        let end = self.text(image, x, VALUE_TOP, 32.0, true, color, number);
-        self.text(
-            image,
-            end + UNIT_GAP,
-            VALUE_TOP + 4,
-            15.0,
-            false,
-            MUTED,
-            unit,
-        );
+        let (number_style, unit_style) = (style(32.0, true, color), style(15.0, false, MUTED));
+        let width = self.width(number_style, number) + UNIT_GAP + self.width(unit_style, unit);
+        let x = center - width / 2;
+        let end = self.text(image, x, VALUE_TOP, number_style, number);
+        self.text(image, end + UNIT_GAP, VALUE_TOP + 4, unit_style, unit);
     }
 
     /// Gauge title. A product name too long for its column loses its leading
@@ -232,15 +222,8 @@ impl Dashboard {
                 fitted = rest;
             }
         }
-        self.text_centered(
-            image,
-            x + width as i32 / 2,
-            25,
-            TITLE_SIZE,
-            true,
-            LABEL,
-            fitted,
-        );
+        let center = x + width as i32 / 2;
+        self.text_centered(image, center, 25, style(TITLE_SIZE, true, LABEL), fitted);
     }
 
     /// Title, value, then a usage bar with its percentage underneath, all
@@ -258,7 +241,13 @@ impl Dashboard {
             rect(image, x, BAR_TOP, filled, BAR_HEIGHT, ACCENT);
             let percent = format!("{usage:.0}%");
             let percent_top = BAR_TOP + BAR_HEIGHT as i32 + 1;
-            self.text_centered(image, center, percent_top, 11.0, false, TEXT, &percent);
+            self.text_centered(
+                image,
+                center,
+                percent_top,
+                style(11.0, false, TEXT),
+                &percent,
+            );
         }
     }
 
@@ -283,26 +272,23 @@ impl Dashboard {
         room: i32,
         place: impl Fn(i32) -> i32,
     ) {
-        let scale = PxScale::from(HEADER_TEXT_SIZE);
-        let width = |text: &str| text_size(scale, &self.regular, text).0 as i32;
+        let (label_style, value_style) = (
+            style(HEADER_TEXT_SIZE, false, LABEL),
+            style(HEADER_TEXT_SIZE, false, TEXT),
+        );
         let prefix = format!("{label} ");
         let Some((prefix, total)) = [prefix.as_str(), ""]
             .into_iter()
-            .map(|prefix| (prefix, width(prefix) + width(value)))
+            .map(|prefix| {
+                let total = self.width(label_style, prefix) + self.width(value_style, value);
+                (prefix, total)
+            })
             .find(|&(_, total)| total <= room)
         else {
             return;
         };
-        let end = self.text(
-            image,
-            place(total),
-            y,
-            HEADER_TEXT_SIZE,
-            false,
-            LABEL,
-            prefix,
-        );
-        self.text(image, end, y, HEADER_TEXT_SIZE, false, TEXT, value);
+        let end = self.text(image, place(total), y, label_style, prefix);
+        self.text(image, end, y, value_style, value);
     }
 
     /// Hostname, kernel and load share one baseline. The hostname starts on
@@ -312,7 +298,13 @@ impl Dashboard {
         rect(image, 0, 0, WIDTH, HEADER_HEIGHT, HEADER);
         let y = self.cap_centered_top(HEADER_TEXT_SIZE, 0, HEADER_HEIGHT);
         let hostname = &snapshot.hostname;
-        let hostname_end = self.text(image, MARGIN, y, HEADER_TEXT_SIZE, true, TEXT, hostname);
+        let hostname_end = self.text(
+            image,
+            MARGIN,
+            y,
+            style(HEADER_TEXT_SIZE, true, TEXT),
+            hostname,
+        );
 
         let room = LEFT_PANEL_RIGHT - hostname_end - 12;
         let kernel = snapshot.kernel;
@@ -329,11 +321,8 @@ impl Dashboard {
     }
 
     /// Cuts a text down until it fits `width`, ending it in an ellipsis.
-    fn shortened(&self, text: &str, size: f32, bold: bool, width: u32) -> String {
-        let (scale, font) = (PxScale::from(size), self.font(bold));
-        shorten(text, |candidate| {
-            text_size(scale, font, candidate).0 <= width
-        })
+    fn shortened(&self, text: &str, style: TextStyle, width: i32) -> String {
+        shorten(text, |candidate| self.width(style, candidate) <= width)
     }
 
     /// What is playing: cover on the left, track and progress on the right.
@@ -353,51 +342,36 @@ impl Dashboard {
         }
         let left = ART_SIZE as i32 + ART_GAP;
         let right = WIDTH as i32 - MARGIN;
-        let width = (right - left) as u32;
+        let width = right - left;
+        let small = style(12.0, false, MUTED);
 
         let time = now.format("%H:%M").to_string();
-        let time_width = text_size(PxScale::from(12.0), &self.regular, &time).0;
-        self.text(
-            image,
-            right - time_width as i32,
-            10,
-            12.0,
-            false,
-            MUTED,
-            &time,
-        );
+        let time_width = self.width(small, &time);
+        self.text(image, right - time_width, 10, small, &time);
 
+        let title_style = style(21.0, true, TEXT);
         let room = width - time_width - 10;
-        let title = self.shortened(&playing.track.title, 21.0, true, room);
-        self.text(image, left, 22, 21.0, true, TEXT, &title);
+        let title = self.shortened(&playing.track.title, title_style, room);
+        self.text(image, left, 22, title_style, &title);
         let mut line = playing.track.artist.clone();
         if !playing.track.album.is_empty() {
             line = format!("{line} · {}", playing.track.album);
         }
-        let line = self.shortened(&line, 14.0, false, width);
-        self.text(image, left, 52, 14.0, false, LABEL, &line);
+        let line_style = style(14.0, false, LABEL);
+        let line = self.shortened(&line, line_style, width);
+        self.text(image, left, 52, line_style, &line);
 
         let bar_top = 84;
-        rect(image, left, bar_top, width, BAR_HEIGHT, TRACK);
+        rect(image, left, bar_top, width as u32, BAR_HEIGHT, TRACK);
         if let Some(length) = playing.length.filter(|length| !length.is_zero()) {
             let share = playing.position.as_secs_f32() / length.as_secs_f32();
-            let filled = (f32::from(u16::try_from(width).unwrap_or(u16::MAX))
-                * share.clamp(0.0, 1.0))
-            .round() as u32;
+            let filled = (width as f32 * share.clamp(0.0, 1.0)).round() as u32;
             rect(image, left, bar_top, filled, BAR_HEIGHT, ACCENT);
             let total = clock_face(length);
-            let total_width = text_size(PxScale::from(12.0), &self.regular, &total).0 as i32;
-            self.text(image, right - total_width, 98, 12.0, false, MUTED, &total);
+            let total_width = self.width(small, &total);
+            self.text(image, right - total_width, 98, small, &total);
         }
-        self.text(
-            image,
-            left,
-            98,
-            12.0,
-            false,
-            MUTED,
-            &clock_face(playing.position),
-        );
+        self.text(image, left, 98, small, &clock_face(playing.position));
         canvas
     }
 
@@ -409,9 +383,9 @@ impl Dashboard {
         let image = &mut canvas;
         let center = WIDTH as i32 / 2;
         let date = format_date(now);
-        self.text_centered(image, center, 18, 20.0, false, DATE, &date);
+        self.text_centered(image, center, 18, style(20.0, false, DATE), &date);
         let time = now.format("%H:%M").to_string();
-        self.text_centered(image, center, 42, 76.0, true, TEXT, &time);
+        self.text_centered(image, center, 42, style(76.0, true, TEXT), &time);
         canvas
     }
 
@@ -492,32 +466,39 @@ impl Dashboard {
             let cell = ((LEFT_PANEL_RIGHT - MARGIN) / fans.len() as i32).min(FAN_CELL_MAX);
             for (index, fan) in fans.iter().enumerate() {
                 let center = MARGIN + cell * index as i32 + cell / 2;
-                let label =
-                    self.shortened(&fan.label.to_uppercase(), 10.0, false, (cell - 4) as u32);
-                self.text_centered(image, center, FAN_BAND_TOP + 6, 10.0, false, LABEL, &label);
+                let label_style = style(10.0, false, LABEL);
+                let label = self.shortened(&fan.label.to_uppercase(), label_style, cell - 4);
+                self.text_centered(image, center, FAN_BAND_TOP + 6, label_style, &label);
                 let rpm = fan.rpm.to_string();
-                self.text_centered(image, center, FAN_BAND_TOP + 18, 15.0, true, TEXT, &rpm);
+                let rpm_style = style(15.0, true, TEXT);
+                self.text_centered(image, center, FAN_BAND_TOP + 18, rpm_style, &rpm);
             }
         }
 
         // Date, clock and weather share the right column's axis.
         let center = RIGHT_COLUMN_CENTER;
         let date = format_date(now);
-        self.text_centered(image, center, 26, 15.0, false, DATE, &date);
+        self.text_centered(image, center, 26, style(15.0, false, DATE), &date);
         let time = now.format("%H:%M").to_string();
-        self.text_centered(image, center, 38, 44.0, true, TEXT, &time);
+        self.text_centered(image, center, 38, style(44.0, true, TEXT), &time);
 
         if let Some(weather) = weather {
             const WEATHER_GAP: i32 = 6;
+            let (temp_style, description_style) =
+                (style(20.0, true, ACCENT), style(13.0, false, TEXT));
             let temp = format!("{:.0}°", weather.temp);
-            let temp_width = text_size(PxScale::from(20.0), &self.bold, &temp).0;
-            let description_width =
-                text_size(PxScale::from(13.0), &self.regular, weather.description).0;
-            let x = center - (temp_width + description_width) as i32 / 2 - WEATHER_GAP / 2;
-            let end = self.text(image, x, 86, 20.0, true, ACCENT, &temp);
-            let description = weather.description;
-            self.text(image, end + WEATHER_GAP, 91, 13.0, false, TEXT, description);
-            self.text_centered(image, center, 110, 11.0, false, MUTED, &weather.city);
+            let width =
+                self.width(temp_style, &temp) + self.width(description_style, weather.description);
+            let x = center - width / 2 - WEATHER_GAP / 2;
+            let end = self.text(image, x, 86, temp_style, &temp);
+            self.text(
+                image,
+                end + WEATHER_GAP,
+                91,
+                description_style,
+                weather.description,
+            );
+            self.text_centered(image, center, 110, style(11.0, false, MUTED), &weather.city);
         }
 
         canvas

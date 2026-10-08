@@ -1,11 +1,13 @@
 //! Current weather from Open-Meteo (no API key), refreshed in the background.
 
-use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
 use anyhow::Context;
+use log::warn;
 use serde::Deserialize;
+
+use crate::background::Background;
 
 const GEOCODING_URL: &str = "https://geocoding-api.open-meteo.com/v1/search";
 const FORECAST_URL: &str = "https://api.open-meteo.com/v1/forecast";
@@ -91,32 +93,31 @@ fn fetch(place: &Place) -> anyhow::Result<Weather> {
     })
 }
 
-/// Latest known weather, shared with the refresh thread.
-#[derive(Default)]
-pub struct WeatherFeed(Arc<Mutex<Option<Weather>>>);
+/// Latest known weather, as the refresh thread last fetched it.
+pub struct WeatherFeed {
+    latest: Background<Option<Weather>>,
+}
 
 impl WeatherFeed {
     /// Starts the refresh thread and hands back the feed it fills.
     #[must_use]
     pub fn start(city: String, refresh: Duration) -> Self {
-        let feed = Self::default();
-        let shared = Arc::clone(&feed.0);
-        thread::spawn(move || {
+        let latest = Background::start("weather", None, move |publisher| {
             let mut place = None;
-            loop {
+            while !publisher.abandoned() {
                 if place.is_none() {
                     place = locate(&city)
-                        .inspect_err(|error| eprintln!("weather: {error:#}"))
+                        .inspect_err(|error| warn!("weather: {error:#}"))
                         .ok();
                 }
                 // A failed refresh keeps showing the previous reading.
                 let delay = match place.as_ref().map(fetch) {
                     Some(Ok(weather)) => {
-                        *shared.lock().unwrap_or_else(PoisonError::into_inner) = Some(weather);
+                        publisher.publish(Some(weather));
                         refresh
                     }
                     Some(Err(error)) => {
-                        eprintln!("weather: {error:#}");
+                        warn!("weather: {error:#}");
                         RETRY_DELAY
                     }
                     None => RETRY_DELAY,
@@ -124,16 +125,19 @@ impl WeatherFeed {
                 thread::sleep(delay);
             }
         });
-        feed
+        Self { latest }
     }
 
     /// The last successful reading, if any has arrived yet.
     #[must_use]
     pub fn latest(&self) -> Option<Weather> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.latest.latest()
+    }
+
+    /// Waits for the first reading, or `timeout`. Returns whether it came.
+    #[must_use]
+    pub fn wait_ready(&self, timeout: Duration) -> bool {
+        self.latest.wait_published(timeout)
     }
 }
 

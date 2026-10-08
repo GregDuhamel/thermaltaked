@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use image::imageops::FilterType;
 use image::{ImageReader, Limits, RgbImage};
+use log::warn;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// Covers are small; anything larger is not one.
@@ -99,7 +100,7 @@ impl CoverArt {
                 }
                 let (url, size) = request;
                 let image = fetch(&url, size)
-                    .inspect_err(|error| eprintln!("cover art: {error:#}"))
+                    .inspect_err(|error| warn!("cover art: {error:#}"))
                     .ok();
                 let mut slot = shared.lock().unwrap_or_else(PoisonError::into_inner);
                 // A later track may have been asked for in the meantime.

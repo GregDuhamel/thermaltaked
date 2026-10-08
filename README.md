@@ -75,7 +75,7 @@ systemctl --user enable --now thermaltaked
 
 The unit runs `~/.cargo/bin/thermaltaked`, where `cargo install` puts it. For
 the release binary, change its `ExecStart` to `%h/.local/bin/thermaltaked run`
-before enabling it.
+before enabling it. Its `Environment=RUST_LOG=info` line picks the log level.
 
 It starts with the graphical session, once the panel is the user's to open,
 and stops with it. That takes a desktop which reaches `graphical-session.target`,
@@ -91,7 +91,16 @@ thermaltaked brightness 60
 thermaltaked preview out.png        # a dashboard frame, without the panel
 thermaltaked preview --clock out.png
 thermaltaked run                    # the daemon
+thermaltaked -v run                 # the same, logging at the debug level
 ```
+
+Logging goes to stderr at the info level: screen changes, the panel coming
+and going, sensors found or lost. `-v` adds the debug level and `-vv` the
+trace level, for this crate only; `RUST_LOG` picks any level or module
+(`RUST_LOG=thermaltaked::player=debug`) when `-v` is not given. Under
+systemd, where the journal timestamps every line already, the lines carry
+journald priorities instead, so `journalctl --user -u thermaltaked -p warning`
+shows only what went wrong. The service unit sets `RUST_LOG=info`.
 
 ## Configuration
 
@@ -121,6 +130,42 @@ table. Monitors are asleep when every enabled connector under
 `/sys/class/drm` reports `dpms` off. The session lock comes from logind's
 `LockedHint`, and the track from MPRIS on the session bus — both over D-Bus,
 and both looked up again if the bus is not there yet at boot.
+
+The hwmon tree is walked once at start and again when it changes under the
+daemon: amdgpu registers its chip anew after a GPU reset or a resume from
+sleep, a power supply plugged back in takes another number, a driver loaded
+later brings a chip that was not there. A reading whose file is gone has the
+tree walked again 5 s after the last walk, and a sensor never found is looked
+for every 30 s; the log says what was found, moved or lost.
+
+## Architecture
+
+One thread draws, and never waits on anything slower than a file in sysfs:
+left a few seconds without a frame, the panel drops to its own screen. So
+whatever comes from the network or from D-Bus is read by a thread of its own,
+which publishes its latest result in a shared slot (`Background<T>` in
+`src/background.rs`), and the drawing loop reads only that.
+
+| Thread | Reads | Publishes | Pace |
+|---|---|---|---|
+| main | sysfs, `/proc`, the slots below; writes to the panel | | `refresh_seconds`, 0.1 to 2 s |
+| `mpris` | `ListNames`, then `GetAll` on every `org.mpris.MediaPlayer2.*` | the first player that is playing, with the time it was read | every second, or sooner on a `PropertiesChanged` from a player |
+| `logind` | the session's `LockedHint` | whether the session is locked | every second, or sooner on a `PropertiesChanged` from the session |
+| `weather` | Open-Meteo | the current weather | `refresh_minutes` |
+| `cover art` | the cover of the track just asked for | that cover, scaled | on request |
+| heartbeat | | | every 2 s, to the panel |
+
+The two D-Bus threads each have a listener thread beside them that turns the
+signals of interest into nudges, which they wait for with a timeout; so a
+track change shows up at once, and the position moves along on its own
+between two readings. Every D-Bus call carries a 2 s timeout: a player that
+keeps its name on the bus but answers nothing (a frozen browser tab, an
+application stopped with `SIGSTOP`) costs the `mpris` thread that timeout once,
+then is left alone for 30 s, and costs the panel nothing. What a thread cannot
+be protected from is a bus whose connection handshake hangs: that holds the
+thread, not the drawing loop, and the panel keeps drawing with the last state
+published. A bus that is not there yet, or a session logind does not know, is
+tried again every 30 s and complained about once.
 
 ## How it talks to the panel
 

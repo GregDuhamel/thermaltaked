@@ -1,12 +1,28 @@
 //! Whether anyone is looking: the monitors' power state and the session lock.
+//!
+//! The monitors are read from sysfs on every frame, which costs nothing. The
+//! lock comes from logind over D-Bus, which a thread of its own asks about
+//! once a second and whenever the session announces a change; the drawing
+//! loop reads only what that thread last published.
 
 use std::env;
 use std::fs;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::thread;
+use std::time::Duration;
 
+use log::debug;
+use zbus::MatchRule;
+use zbus::blocking::proxy::Builder as ProxyBuilder;
 use zbus::blocking::{Connection, Proxy};
+use zbus::message::Type;
+use zbus::proxy::CacheProperties;
 use zbus::zvariant::OwnedObjectPath;
+
+use crate::background::{Background, Publisher};
+use crate::bus;
+use crate::complaint::Complaint;
 
 /// Connectors live here, one directory per output, `enabled` telling which
 /// ones drive a monitor and `dpms` whether that monitor is powered.
@@ -16,10 +32,14 @@ const LOGIND: &str = "org.freedesktop.login1";
 const MANAGER_PATH: &str = "/org/freedesktop/login1";
 const MANAGER: &str = "org.freedesktop.login1.Manager";
 const SESSION: &str = "org.freedesktop.login1.Session";
+const PROPERTIES: &str = "org.freedesktop.DBus.Properties";
 const GRAPHICAL_TYPES: [&str; 2] = ["wayland", "x11"];
 /// A service can start before anyone logs in, so a missing session is worth
 /// coming back to rather than giving up on.
 const RETRY: Duration = Duration::from_secs(30);
+/// logind announces the lock, but the hint is read again this often anyway,
+/// in case an announcement was missed.
+const POLL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenState {
@@ -69,11 +89,9 @@ fn monitors_asleep(connectors: &Path) -> bool {
 }
 
 /// Reads the state the dashboard reacts to. Built once, then asked on every
-/// frame: the monitors come from sysfs, the lock from logind over D-Bus.
+/// frame: the monitors come from sysfs, the lock from the logind thread.
 pub struct Screens {
-    session: Option<Proxy<'static>>,
-    last_try: Instant,
-    complained: bool,
+    locked: Background<bool>,
 }
 
 fn graphical_session(connection: &Connection) -> zbus::Result<OwnedObjectPath> {
@@ -100,64 +118,24 @@ fn graphical_session(connection: &Connection) -> zbus::Result<OwnedObjectPath> {
 }
 
 impl Screens {
+    /// Starts the thread that follows the session lock.
     #[must_use]
     pub fn new() -> Self {
-        let mut screens = Self {
-            session: None,
-            last_try: Instant::now(),
-            complained: false,
-        };
-        screens.connect();
-        screens
-    }
-
-    /// Looks logind up again. Until it answers, the lock goes unnoticed, which
-    /// is worth one line on stderr and no more: the monitors still say most of
-    /// it.
-    fn connect(&mut self) {
-        self.last_try = Instant::now();
-        match Connection::system().and_then(|connection| {
-            let path = graphical_session(&connection)?;
-            Proxy::new(&connection, LOGIND, path, SESSION)
-        }) {
-            Ok(session) => {
-                if self.complained {
-                    eprintln!("lock state readable again");
-                }
-                self.complained = false;
-                self.session = Some(session);
-            }
-            Err(error) => {
-                if !self.complained {
-                    eprintln!("lock state unavailable: {error}");
-                    self.complained = true;
-                }
-            }
+        Self {
+            locked: Background::start("logind", false, |publisher| watch(&publisher)),
         }
     }
 
-    fn locked(&mut self) -> bool {
-        if self.session.is_none() && self.last_try.elapsed() >= RETRY {
-            self.connect();
-        }
-        let Some(session) = &self.session else {
-            return false;
-        };
-        match session.get_property::<bool>("LockedHint") {
-            Ok(locked) => locked,
-            Err(error) => {
-                // The bus went away with the session: look it up again later.
-                eprintln!("lock state lost: {error}");
-                self.session = None;
-                self.last_try = Instant::now();
-                false
-            }
-        }
+    /// Waits for the thread's first word on the lock, or `timeout`. Returns
+    /// whether it came: until it does, the session passes for unlocked.
+    #[must_use]
+    pub fn wait_ready(&self, timeout: Duration) -> bool {
+        self.locked.wait_published(timeout)
     }
 
     #[must_use]
-    pub fn state(&mut self) -> ScreenState {
-        if self.locked() {
+    pub fn state(&self) -> ScreenState {
+        if self.locked.latest() {
             ScreenState::Locked
         } else if monitors_asleep(Path::new(CONNECTORS)) {
             ScreenState::Asleep
@@ -170,6 +148,86 @@ impl Screens {
 impl Default for Screens {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// `PropertiesChanged` on the session object: the sender is left out of the
+/// rule, since a well-known name there would never match the unique name
+/// the signal carries.
+fn changes_rule(session: &OwnedObjectPath) -> zbus::Result<MatchRule<'static>> {
+    Ok(MatchRule::builder()
+        .msg_type(Type::Signal)
+        .interface(PROPERTIES)?
+        .member("PropertiesChanged")?
+        .path(session.clone())?
+        .build())
+}
+
+/// The thread: finds the session, then reads `LockedHint` on every nudge and
+/// at least every [`POLL`], until logind or the bus fails, when it starts
+/// over. Until it finds the session the lock goes unnoticed, which is worth
+/// one line in the log and no more: the monitors still say most of it.
+fn watch(publisher: &Publisher<bool>) {
+    let mut complaint = Complaint::default();
+    while !publisher.abandoned() {
+        let connected = bus::system().and_then(|connection| {
+            let path = graphical_session(&connection)?;
+            let nudges = bus::nudges(&connection, changes_rule(&path)?, "logind-signals")?;
+            // Not cached: each read asks logind, and a stale hint is worse
+            // than a round trip a second.
+            let session: Proxy<'static> = ProxyBuilder::new(&connection)
+                .destination(LOGIND)?
+                .path(path)?
+                .interface(SESSION)?
+                .cache_properties(CacheProperties::No)
+                .build()?;
+            Ok((session, nudges))
+        });
+        let (session, nudges) = match connected {
+            Ok(connected) => connected,
+            Err(error) => {
+                complaint.raise(format!("lock state unavailable: {error}"));
+                thread::sleep(RETRY);
+                continue;
+            }
+        };
+        complaint.withdraw("lock state readable again");
+        let error = follow(&session, &nudges, publisher);
+        if publisher.abandoned() {
+            return;
+        }
+        // Unlocked until logind says otherwise, as at the start.
+        publisher.publish(false);
+        complaint.raise(format!("lock state lost: {error}"));
+        thread::sleep(RETRY);
+    }
+}
+
+/// Reads the hint until the session or the bus fails, and says how.
+fn follow(session: &Proxy<'_>, nudges: &Receiver<()>, publisher: &Publisher<bool>) -> zbus::Error {
+    loop {
+        match session.get_property::<bool>("LockedHint") {
+            Ok(locked) => {
+                if locked != publisher.latest() {
+                    debug!(
+                        "logind: session {}",
+                        if locked { "locked" } else { "unlocked" }
+                    );
+                }
+                publisher.publish(locked);
+            }
+            Err(error) => return error,
+        }
+        if publisher.abandoned() {
+            return zbus::Error::Failure("nobody reads the lock state anymore".to_owned());
+        }
+        match nudges.recv_timeout(POLL) {
+            Ok(()) => while nudges.try_recv().is_ok() {},
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                return zbus::Error::Failure("the signal stream ended".to_owned());
+            }
+        }
     }
 }
 
@@ -212,5 +270,17 @@ mod tests {
         let unplugged = connectors(&[("card1-DP-1", "disabled", "Off")]);
         assert!(!monitors_asleep(unplugged.path()));
         assert!(!monitors_asleep(Path::new("/nonexistent")));
+    }
+
+    #[test]
+    fn the_session_rule_names_its_path_and_not_its_sender() {
+        let path = OwnedObjectPath::try_from("/org/freedesktop/login1/session/_32").unwrap();
+        let rule = changes_rule(&path).unwrap();
+        assert!(rule.sender().is_none());
+        assert_eq!(
+            rule.member().map(ToString::to_string).as_deref(),
+            Some("PropertiesChanged")
+        );
+        assert_eq!(rule.msg_type(), Some(Type::Signal));
     }
 }

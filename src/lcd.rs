@@ -9,6 +9,7 @@ use std::time::Duration;
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
 use image::{DynamicImage, RgbImage};
+use log::warn;
 
 use crate::device::{self, Channel, DeviceError};
 use crate::protocol::{self, FrameError, HEIGHT, WIDTH};
@@ -112,7 +113,7 @@ impl Lcd {
                     } else {
                         "the LCD stopped taking it"
                     };
-                    eprintln!("heartbeat stopped, {why}: {error}");
+                    warn!("heartbeat stopped, {why}: {error}");
                     return;
                 }
                 let _ = command.wait_reply(REPLY_TIMEOUT);
