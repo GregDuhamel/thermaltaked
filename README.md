@@ -40,46 +40,66 @@ readings by `cargo run --example demo_frame`.
 
 ## Setup
 
-The panel's two HID interfaces belong to root until a udev rule hands them to
-the logged-in user:
+The binary lives in `/usr/local/bin`, the udev rule in `/etc/udev/rules.d`,
+and the service unit and the configuration under `~/.config`. The Makefile
+does each step and refuses to run as the wrong user: `cargo` never runs under
+`sudo`, and the user unit is never installed by root.
 
 ```sh
-sudo cp udev/70-thermaltake-lcd.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules && sudo udevadm trigger
-```
-
-Then take the binary from the [latest release](https://github.com/GregDuhamel/thermaltaked/releases/latest)
-and put it in `~/.local/bin`, or build it:
-
-```sh
-cargo install --path .
-mkdir -p ~/.config/thermaltaked
-cp config.example.toml ~/.config/thermaltaked/config.toml
+make build                              # cargo build --release --locked
+sudo make install install-udev          # /usr/local/bin/thermaltaked, the udev rule
+make install-config                     # ~/.config/thermaltaked/config.toml, kept if present
+make install-unit                       # the user unit, enabled and started
 ```
 
 Building takes Rust 1.88 or later. The release profile strips the binary,
 links it with thin LTO and aborts on panic, so a bug ends the process and
 systemd restarts it rather than leaving a half-dead daemon on the panel.
+`make check` runs what CI runs: fmt, check, clippy, the tests and the docs.
+
+The udev rule hands the panel's two HID interfaces, which belong to root, to
+the logged-in user; `thermaltaked info` says whether it took. `make
+install-unit` restarts a running service, so it is also how a new binary is
+taken up after another `make build && sudo make install`. `make uninstall`,
+`uninstall-udev` and `uninstall-unit` take each piece out again.
+
+### From a release
+
+The [latest release](https://github.com/GregDuhamel/thermaltaked/releases/latest)
+carries `thermaltaked-x86_64-linux`, a statically linked binary that runs on
+any x86_64 distribution whatever its glibc, with the udev rule, the service
+unit, the example configuration and a `SHA256SUMS` file. Check the sums,
+then put each file where the Makefile would:
+
+```sh
+sha256sum --check --ignore-missing SHA256SUMS
+sudo install -Dm 0755 thermaltaked-x86_64-linux /usr/local/bin/thermaltaked
+sudo install -Dm 0644 70-thermaltake-lcd.rules /etc/udev/rules.d/70-thermaltake-lcd.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=hidraw
+install -Dm 0644 config.example.toml ~/.config/thermaltaked/config.toml
+install -Dm 0644 thermaltaked.service ~/.config/systemd/user/thermaltaked.service
+systemctl --user daemon-reload && systemctl --user enable --now thermaltaked
+```
+
+`--ignore-missing` lets `sha256sum` check whichever of the assets were
+downloaded. The binary brings its own libc but no fonts: those stay the
+distribution's, see below.
+
+`cargo install --path .` is the alternative: the binary then sits in
+`~/.cargo/bin`, and the unit's `ExecStart` is changed to its commented
+`%h/.cargo/bin/thermaltaked run` line before it is enabled.
+
+### Fonts and the session
 
 The dashboard is drawn in DejaVu Sans, which most distributions ship
 (`dejavu-sans-fonts` on Fedora, `fonts-dejavu-core` on Debian and Ubuntu,
 `ttf-dejavu` on Arch) and which is looked for in each one's font directory.
 Any other TrueType files can be named in the configuration instead.
 
-As a user service:
-
-```sh
-cp systemd/thermaltaked.service ~/.config/systemd/user/
-systemctl --user enable --now thermaltaked
-```
-
-The unit runs `~/.cargo/bin/thermaltaked`, where `cargo install` puts it. For
-the release binary, change its `ExecStart` to `%h/.local/bin/thermaltaked run`
-before enabling it. Its `Environment=RUST_LOG=info` line picks the log level.
-
-It starts with the graphical session, once the panel is the user's to open,
-and stops with it. That takes a desktop which reaches `graphical-session.target`,
-as GNOME and Plasma do; elsewhere, set `WantedBy=default.target` instead.
+The unit's `Environment=RUST_LOG=info` line picks the log level. It starts
+with the graphical session, once the panel is the user's to open, and stops
+with it. That takes a desktop which reaches `graphical-session.target`, as
+GNOME and Plasma do; elsewhere, set `WantedBy=default.target` instead.
 
 ## Usage
 
@@ -213,8 +233,10 @@ which this project reimplements in Rust rather than copies.
 
 Bump `version` in `Cargo.toml` and add the version's section to
 [CHANGELOG.md](CHANGELOG.md) through a pull request, then run the Release
-workflow: it tags that version, builds the binary and publishes it with the
-udev rule, the service unit and the example configuration.
+workflow: it tags that version, builds the binary for
+`x86_64-unknown-linux-musl`, checks that it is static and draws a frame, and
+publishes it with the udev rule, the service unit, the example configuration
+and their `SHA256SUMS`.
 
 ## License
 
