@@ -260,6 +260,8 @@ impl Sensors {
         }
     }
 
+    // Jiffies since the last sample: thousands, far below what f32 holds exactly.
+    #[allow(clippy::cast_precision_loss)]
     fn cpu_usage(&mut self) -> Option<f32> {
         let current = cpu_times()?;
         let previous = self.previous_cpu_times.replace(current)?;
@@ -311,7 +313,7 @@ impl Sensors {
                 .fans
                 .iter()
                 .filter_map(|fan| {
-                    let rpm = read_number(&fan.path)? as u32;
+                    let rpm: u32 = read_trimmed(&fan.path)?.parse().ok()?;
                     (rpm > 0 || fan.always_shown).then_some(Fan {
                         label: &fan.label,
                         rpm,

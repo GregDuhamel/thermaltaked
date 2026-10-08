@@ -1,0 +1,3 @@
+# Product names that are not code: `doc_markdown` must not ask for backticks
+# around them.
+doc-valid-idents = ["Thermaltake", "MPRIS", "DejaVu", "Open-Meteo", "JPEG", "TrueType", "hidraw", "hwmon", "logind", "..", ]

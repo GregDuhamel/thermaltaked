@@ -5,7 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::protocol::{FRAME_PACKET_SIZE, PRODUCT_ID, VENDOR_ID};
 
@@ -47,7 +47,7 @@ fn usb_identity(sys_hidraw: &Path) -> Option<(u32, u32, u8)> {
     Some((
         read_hex(&usb_device.join("idVendor"))?,
         read_hex(&usb_device.join("idProduct"))?,
-        read_hex(&interface_dir.join("bInterfaceNumber"))? as u8,
+        u8::try_from(read_hex(&interface_dir.join("bInterfaceNumber"))?).ok()?,
     ))
 }
 
@@ -118,18 +118,34 @@ impl Channel {
         Ok(())
     }
 
+    /// One `poll(2)` for input, taken up again with whatever time is left
+    /// when a signal cuts it short.
+    // poll(2) has no safe wrapper in std; rustix would offer one.
+    #[allow(unsafe_code)]
     fn readable(&self, timeout: Duration) -> io::Result<bool> {
-        let mut pollfd = libc::pollfd {
-            fd: self.file.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let millis = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
-        // SAFETY: pollfd is a valid, exclusively borrowed array of length 1.
-        match unsafe { libc::poll(&raw mut pollfd, 1, millis) } {
-            -1 => Err(io::Error::last_os_error()),
-            0 => Ok(false),
-            _ => Ok(true),
+        let deadline = Instant::now() + timeout;
+        let mut remaining = timeout;
+        loop {
+            let mut pollfd = libc::pollfd {
+                fd: self.file.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // Rounded up: a sub-millisecond remainder must sleep, not spin.
+            let millis =
+                i32::try_from(remaining.as_nanos().div_ceil(1_000_000)).unwrap_or(i32::MAX);
+            // SAFETY: pollfd is a valid, exclusively borrowed array of length 1.
+            match unsafe { libc::poll(&raw mut pollfd, 1, millis) } {
+                -1 => {
+                    let error = io::Error::last_os_error();
+                    if error.kind() != io::ErrorKind::Interrupted {
+                        return Err(error);
+                    }
+                    remaining = deadline.saturating_duration_since(Instant::now());
+                }
+                0 => return Ok(false),
+                _ => return Ok(true),
+            }
         }
     }
 

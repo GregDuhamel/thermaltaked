@@ -47,8 +47,8 @@ sudo cp udev/70-thermaltake-lcd.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
-Then take the binary from the [latest release](https://github.com/GregDuhamel/thermaltaked/releases/latest),
-or build it:
+Then take the binary from the [latest release](https://github.com/GregDuhamel/thermaltaked/releases/latest)
+and put it in `~/.local/bin`, or build it:
 
 ```sh
 cargo install --path .
@@ -56,12 +56,21 @@ mkdir -p ~/.config/thermaltaked
 cp config.example.toml ~/.config/thermaltaked/config.toml
 ```
 
+The dashboard is drawn in DejaVu Sans, which most distributions ship
+(`dejavu-sans-fonts` on Fedora, `fonts-dejavu-core` on Debian and Ubuntu,
+`ttf-dejavu` on Arch) and which is looked for in each one's font directory.
+Any other TrueType files can be named in the configuration instead.
+
 As a user service:
 
 ```sh
 cp systemd/thermaltaked.service ~/.config/systemd/user/
 systemctl --user enable --now thermaltaked
 ```
+
+The unit runs `~/.cargo/bin/thermaltaked`, where `cargo install` puts it. For
+the release binary, change its `ExecStart` to `%h/.local/bin/thermaltaked run`
+before enabling it.
 
 It starts with the graphical session, once the panel is the user's to open,
 and stops with it. That takes a desktop which reaches `graphical-session.target`,
@@ -88,13 +97,13 @@ the hardware is detected on its own and the weather is left out.
 |---|---|
 | `refresh_seconds` | seconds between frames, kept within 0.1 and 2 |
 | `brightness` | backlight, 0 to 100 |
-| `font_regular`, `font_bold` | any TrueType files |
+| `font_regular`, `font_bold` | any TrueType files; the distribution's DejaVu Sans when unset |
 | `clock_when_away` | fall back to the clock while nobody is watching |
 | `show_player` | give the panel over to whatever is playing |
 | `psu_rating` | the supply's wattage, read from its model name when unset |
 | `[weather]` | the city to look up, and how often |
 | `[names]` | gauge titles, detected from the hardware when unset |
-| `[fans]` | which fans to show, in which order, under which names |
+| `[fans]` | which fans to show (six at most), in which order, under which names |
 
 The panel returns to its own screen when a few seconds pass without a frame,
 which is why `refresh_seconds` goes no higher than two.

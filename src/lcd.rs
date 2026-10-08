@@ -2,7 +2,7 @@
 
 use std::io::Cursor;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -39,13 +39,14 @@ pub struct Lcd {
 }
 
 impl Lcd {
-    /// Opens both interfaces and runs the wake-up handshake.
+    /// Opens both interfaces and runs the wake-up handshake, which ends by
+    /// setting the backlight to `brightness` percent.
     ///
     /// # Errors
     ///
     /// When the panel is absent, its hidraw nodes cannot be opened, or it does
     /// not acknowledge the handshake.
-    pub fn open() -> Result<Self, LcdError> {
+    pub fn open(brightness: u8) -> Result<Self, LcdError> {
         let nodes = device::discover().map_err(DeviceError::from)?;
         let lcd = Self {
             command: Arc::new(Mutex::new(Channel::open(
@@ -55,39 +56,38 @@ impl Lcd {
             frame: Channel::open(&nodes, protocol::FRAME_INTERFACE)?,
             heartbeat: None,
         };
-        lcd.handshake()?;
+        lcd.handshake(brightness)?;
         Ok(lcd)
     }
 
-    fn handshake(&self) -> Result<(), LcdError> {
+    /// The handshake wakes the panel at whatever brightness it last had, so
+    /// the wanted one follows straight away rather than after a flash.
+    fn handshake(&self, brightness: u8) -> Result<(), LcdError> {
         self.frame.drain()?;
-        let command = self.command.lock().unwrap();
+        let command = self.command.lock().unwrap_or_else(PoisonError::into_inner);
         command.drain()?;
         for opcode in protocol::HANDSHAKE_OPCODES {
             command.send(&protocol::handshake(opcode))?;
             command.wait_reply(REPLY_TIMEOUT)?;
         }
-        command.send(&protocol::brightness(100))?;
+        command.send(&protocol::brightness(brightness))?;
         Ok(())
     }
 
+    /// Sets the backlight, 0 to 100. Whether the panel acknowledges this
+    /// command is not known, so none is waited for.
+    ///
     /// # Errors
     ///
     /// When the command cannot be sent to the panel.
-    ///
-    /// # Panics
-    ///
-    /// When another thread panicked while holding the command interface.
     pub fn set_brightness(&self, percent: u8) -> Result<(), LcdError> {
-        let command = self.command.lock().unwrap();
+        let command = self.command.lock().unwrap_or_else(PoisonError::into_inner);
         Ok(command.send(&protocol::brightness(percent))?)
     }
 
     /// Keeps the panel awake from a background thread until `self` is dropped.
-    ///
-    /// # Panics
-    ///
-    /// When another thread panicked while holding the command interface.
+    /// Should the panel stop taking heartbeats, the thread logs why and ends,
+    /// which [`Lcd::heartbeat_stopped`] reports.
     pub fn start_heartbeat(&mut self) {
         if self.heartbeat.is_some() {
             return;
@@ -96,15 +96,24 @@ impl Lcd {
         let command = Arc::clone(&self.command);
         let thread = thread::spawn(move || {
             while stopped.recv_timeout(HEARTBEAT_INTERVAL) == Err(RecvTimeoutError::Timeout) {
-                let command = command.lock().unwrap();
-                // Errors surface on the next frame upload, which the caller sees.
-                if command.send(&protocol::heartbeat()).is_err() {
+                let command = command.lock().unwrap_or_else(PoisonError::into_inner);
+                if let Err(error) = command.send(&protocol::heartbeat()) {
+                    eprintln!("heartbeat stopped: {error}");
                     return;
                 }
                 let _ = command.wait_reply(REPLY_TIMEOUT);
             }
         });
         self.heartbeat = Some(Heartbeat { stop, thread });
+    }
+
+    /// True once the heartbeat thread has given up on the panel, which is
+    /// worth a reconnection even before a frame upload fails.
+    #[must_use]
+    pub fn heartbeat_stopped(&self) -> bool {
+        self.heartbeat
+            .as_ref()
+            .is_some_and(|heartbeat| heartbeat.thread.is_finished())
     }
 
     /// Uploads an already encoded baseline JPEG and waits for the panel's ack.

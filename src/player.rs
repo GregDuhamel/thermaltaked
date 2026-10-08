@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use zbus::blocking::Connection;
 use zbus::blocking::fdo::PropertiesProxy;
+use zbus::fdo;
 use zbus::names::InterfaceName;
 use zbus::zvariant::OwnedValue;
 
@@ -129,39 +130,62 @@ impl Default for Players {
     }
 }
 
+/// Whether a player's failure is really the bus going away, which is worth
+/// starting over, rather than that player leaving between `ListNames` and
+/// the call that followed it.
+fn lost_bus(error: &fdo::Error) -> bool {
+    matches!(error, fdo::Error::ZBus(zbus::Error::InputOutput(_)))
+}
+
+/// Every property of the player interface, in one round trip and none of it
+/// cached: the position moves along without a signal to announce it.
+fn properties(connection: &Connection, name: String) -> fdo::Result<HashMap<String, OwnedValue>> {
+    let player = InterfaceName::from_static_str_unchecked(PLAYER);
+    let properties = PropertiesProxy::builder(connection)
+        .destination(name)?
+        .path(MPRIS_PATH)?
+        .build()?;
+    properties.get_all(player)
+}
+
+/// What a player is playing, from its properties, when it is.
+fn playing_from(all: &HashMap<String, OwnedValue>) -> Option<NowPlaying> {
+    if text_value(all.get("PlaybackStatus")).as_deref() != Some("Playing") {
+        return None;
+    }
+    let metadata = all
+        .get("Metadata")
+        .and_then(|value| HashMap::<String, OwnedValue>::try_from(value.clone()).ok())
+        .unwrap_or_default();
+    // Some browser tabs play without saying what: nothing worth the panel.
+    let title = text(&metadata, "xesam:title").filter(|title| !title.is_empty())?;
+    Some(NowPlaying {
+        track: Track {
+            title,
+            artist: text(&metadata, "xesam:artist").unwrap_or_default(),
+            album: text(&metadata, "xesam:album").unwrap_or_default(),
+            art_url: text(&metadata, "mpris:artUrl"),
+        },
+        position: all.get("Position").and_then(duration).unwrap_or_default(),
+        length: micros(&metadata, "mpris:length"),
+    })
+}
+
+/// Fails only when the bus itself is out of reach: a player that leaves
+/// between `ListNames` and its own answer is skipped, not held against the
+/// others.
 fn now_playing(connection: &Connection) -> zbus::Result<Option<NowPlaying>> {
     let bus = zbus::blocking::Proxy::new(connection, DBUS, DBUS_PATH, DBUS)?;
     let names: Vec<String> = bus.call("ListNames", &())?;
-    let player = InterfaceName::try_from(PLAYER)?;
     for name in names.into_iter().filter(|n| n.starts_with(MPRIS_PREFIX)) {
-        // One round trip for the lot, and none of it cached: the position
-        // moves along without a signal to announce it.
-        let properties = PropertiesProxy::builder(connection)
-            .destination(name)?
-            .path(MPRIS_PATH)?
-            .build()?;
-        let all = properties.get_all(player.clone())?;
-        if text_value(all.get("PlaybackStatus")).as_deref() != Some("Playing") {
-            continue;
-        }
-        let metadata = all
-            .get("Metadata")
-            .and_then(|value| HashMap::<String, OwnedValue>::try_from(value.clone()).ok())
-            .unwrap_or_default();
-        // Some browser tabs play without saying what: nothing worth the panel.
-        let Some(title) = text(&metadata, "xesam:title").filter(|title| !title.is_empty()) else {
-            continue;
+        let all = match properties(connection, name) {
+            Ok(all) => all,
+            Err(error) if lost_bus(&error) => return Err(error.into()),
+            Err(_) => continue,
         };
-        return Ok(Some(NowPlaying {
-            track: Track {
-                title,
-                artist: text(&metadata, "xesam:artist").unwrap_or_default(),
-                album: text(&metadata, "xesam:album").unwrap_or_default(),
-                art_url: text(&metadata, "mpris:artUrl"),
-            },
-            position: all.get("Position").and_then(duration).unwrap_or_default(),
-            length: micros(&metadata, "mpris:length"),
-        }));
+        if let Some(playing) = playing_from(&all) {
+            return Ok(Some(playing));
+        }
     }
     Ok(None)
 }
@@ -169,7 +193,7 @@ fn now_playing(connection: &Connection) -> zbus::Result<Option<NowPlaying>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zbus::zvariant::Value;
+    use zbus::zvariant::{Dict, Signature, Value};
 
     fn metadata(entries: Vec<(&str, Value<'_>)>) -> HashMap<String, OwnedValue> {
         entries
@@ -208,5 +232,64 @@ mod tests {
             Some(Duration::from_secs(418))
         );
         assert_eq!(micros(&metadata, "negative"), None);
+    }
+
+    /// The player's properties as `GetAll` returns them, the metadata being a
+    /// dictionary of variants.
+    fn properties(status: &str, metadata: Vec<(&str, Value<'_>)>) -> HashMap<String, OwnedValue> {
+        let mut dict = Dict::new(&Signature::Str, &Signature::Variant);
+        for (key, value) in metadata {
+            dict.add(key, value).unwrap();
+        }
+        let mut all = HashMap::new();
+        all.insert(
+            "PlaybackStatus".to_owned(),
+            Value::from(status).try_to_owned().unwrap(),
+        );
+        all.insert(
+            "Metadata".to_owned(),
+            Value::Dict(dict).try_to_owned().unwrap(),
+        );
+        all.insert(
+            "Position".to_owned(),
+            Value::from(97_000_000_i64).try_to_owned().unwrap(),
+        );
+        all
+    }
+
+    #[test]
+    fn a_playing_player_is_read_whole() {
+        let all = properties(
+            "Playing",
+            vec![
+                ("xesam:title", Value::from("Adagio for Strings")),
+                ("xesam:artist", Value::from(vec!["Tiësto"])),
+                ("mpris:length", Value::from(418_000_000_i64)),
+            ],
+        );
+        let playing = playing_from(&all).unwrap();
+        assert_eq!(playing.track.title, "Adagio for Strings");
+        assert_eq!(playing.track.artist, "Tiësto");
+        assert_eq!(playing.track.album, "");
+        assert_eq!(playing.position, Duration::from_secs(97));
+        assert_eq!(playing.length, Some(Duration::from_secs(418)));
+    }
+
+    #[test]
+    fn paused_and_untitled_players_are_passed_over() {
+        let paused = properties("Paused", vec![("xesam:title", Value::from("Anything"))]);
+        assert!(playing_from(&paused).is_none());
+        let untitled = properties("Playing", vec![("xesam:title", Value::from(""))]);
+        assert!(playing_from(&untitled).is_none());
+    }
+
+    #[test]
+    fn only_a_dead_bus_costs_the_connection() {
+        // The player left between ListNames and GetAll: the others still count.
+        assert!(!lost_bus(&fdo::Error::ServiceUnknown("gone".to_owned())));
+        assert!(!lost_bus(&fdo::Error::UnknownInterface("none".to_owned())));
+        let broken = std::io::Error::from(std::io::ErrorKind::BrokenPipe);
+        let lost = fdo::Error::ZBus(zbus::Error::InputOutput(std::sync::Arc::new(broken)));
+        assert!(lost_bus(&lost));
     }
 }

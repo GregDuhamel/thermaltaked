@@ -1,7 +1,9 @@
 [package]
 name = "thermaltaked"
-version = "0.3.5"
+version = "0.4.0"
 edition = "2024"
+# let-chains, used throughout, landed in 1.88.
+rust-version = "1.88"
 description = "Driver and dashboard daemon for the Thermaltake 3.9\" bar LCD (264a:233d) on Linux"
 repository = "https://github.com/GregDuhamel/thermaltaked"
 license = "GPL-3.0-or-later"
@@ -19,17 +21,26 @@ libc = "0.2.189"
 serde = { version = "1.0.229", features = ["derive"] }
 signal-hook = "0.4.4"
 thiserror = "2.0.20"
+# The parser goes through a table before it reaches `Config`, so without
+# `preserve_order` the fans would come out sorted rather than as written.
 toml = { version = "1.1.6", features = ["preserve_order"] }
 ureq = { version = "3.4.2", features = ["json"] }
 zbus = "5.19.0"
 
 [dev-dependencies]
 serde_json = "1.0.151"
+tempfile = "3.27.0"
 
-# The crate is a library with a binary on top, so its public API is documented
-# as one: these are the pedantic lints that keep it that way.
+[profile.release]
+strip = true
+lto = "thin"
+panic = "abort"
+
+[lints.rust]
+unsafe_code = "warn" # deny once the libc calls have moved to rustix
+
+# The crate is a library with a binary on top, so its public API is held to
+# the pedantic set, which keeps it documented as one.
 [lints.clippy]
-doc_markdown = "warn"
-missing_errors_doc = "warn"
-missing_panics_doc = "warn"
-must_use_candidate = "warn"
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"

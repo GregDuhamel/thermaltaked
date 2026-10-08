@@ -1,6 +1,6 @@
 //! Current weather from Open-Meteo (no API key), refreshed in the background.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
@@ -97,10 +97,6 @@ pub struct WeatherFeed(Arc<Mutex<Option<Weather>>>);
 
 impl WeatherFeed {
     /// Starts the refresh thread and hands back the feed it fills.
-    ///
-    /// # Panics
-    ///
-    /// When another thread panicked while holding the latest reading.
     #[must_use]
     pub fn start(city: String, refresh: Duration) -> Self {
         let feed = Self::default();
@@ -116,7 +112,7 @@ impl WeatherFeed {
                 // A failed refresh keeps showing the previous reading.
                 let delay = match place.as_ref().map(fetch) {
                     Some(Ok(weather)) => {
-                        *shared.lock().unwrap() = Some(weather);
+                        *shared.lock().unwrap_or_else(PoisonError::into_inner) = Some(weather);
                         refresh
                     }
                     Some(Err(error)) => {
@@ -132,17 +128,18 @@ impl WeatherFeed {
     }
 
     /// The last successful reading, if any has arrived yet.
-    ///
-    /// # Panics
-    ///
-    /// When another thread panicked while holding the latest reading.
     #[must_use]
     pub fn latest(&self) -> Option<Weather> {
-        self.0.lock().unwrap().clone()
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 }
 
+// The temperature compared is the very literal that went in.
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
 

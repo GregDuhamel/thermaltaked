@@ -19,8 +19,9 @@ const PLAYER: &str = "docs/player.png";
 /// Stands in for a downloaded cover, so the screenshot needs no network.
 fn cover() -> RgbImage {
     RgbImage::from_fn(ART_SIZE, ART_SIZE, |x, y| {
-        let wave = (x * 255 / ART_SIZE) as u8;
-        let fade = (y * 255 / ART_SIZE) as u8;
+        // x and y stay below ART_SIZE, so both quotients fit a byte.
+        let wave = u8::try_from(x * 255 / ART_SIZE).unwrap_or(u8::MAX);
+        let fade = u8::try_from(y * 255 / ART_SIZE).unwrap_or(u8::MAX);
         Rgb([40 + wave / 3, 30 + fade / 4, 90 + wave / 3])
     })
 }
@@ -72,8 +73,8 @@ fn main() -> anyhow::Result<()> {
     };
     let now = Local.with_ymd_and_hms(2026, 3, 14, 21, 7, 0).unwrap();
 
-    let config = thermaltaked::config::Config::default();
-    let dashboard = Dashboard::new(&config.font_regular, &config.font_bold)?;
+    let (regular, bold) = thermaltaked::config::Config::default().fonts()?;
+    let dashboard = Dashboard::new(&regular, &bold)?;
     dashboard
         .render(&snapshot, Some(&weather), now)
         .save(DASHBOARD)?;
