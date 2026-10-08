@@ -64,6 +64,8 @@ pub fn brightness(percent: u8) -> [u8; COMMAND_PACKET_SIZE] {
 ///
 /// When `jpeg` is not a complete JPEG stream, or is too large to address with
 /// a one-byte packet count.
+// At most MAX_FRAME_PACKETS, so the count and the indexes fit in a byte.
+#[allow(clippy::cast_possible_truncation)]
 pub fn frame_packets(
     jpeg: &[u8],
 ) -> Result<impl Iterator<Item = [u8; FRAME_PACKET_SIZE]> + '_, FrameError> {
@@ -74,7 +76,6 @@ pub fn frame_packets(
         return Err(FrameError::TooLarge(jpeg.len()));
     }
 
-    // At most MAX_FRAME_PACKETS, so the count and the indexes fit in a byte.
     let count = jpeg.len().div_ceil(FRAME_DATA_SIZE) as u8;
     Ok(jpeg
         .chunks(FRAME_DATA_SIZE)

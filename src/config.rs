@@ -15,14 +15,29 @@ const MAX_REFRESH_SECONDS: f32 = 2.0;
 const MIN_REFRESH_SECONDS: f32 = 0.1;
 const DEFAULT_REFRESH_SECONDS: f32 = 1.0;
 
+/// Where distributions keep DejaVu Sans, the dashboard's font unless the
+/// configuration names another.
+const FONT_DIRS: [&str; 6] = [
+    "/usr/share/fonts/dejavu-sans-fonts", // Fedora
+    "/usr/share/fonts/truetype/dejavu",   // Debian, Ubuntu
+    "/usr/share/fonts/TTF",               // Arch, Void
+    "/usr/share/fonts/dejavu",            // Gentoo, Alpine
+    "/usr/share/fonts/truetype",          // openSUSE
+    "/usr/local/share/fonts",             // a hand-installed copy
+];
+const FONT_REGULAR: &str = "DejaVuSans.ttf";
+const FONT_BOLD: &str = "DejaVuSans-Bold.ttf";
+
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Seconds between two frames, brought back within 0.1 and 2 on load.
     pub refresh_seconds: f32,
     pub brightness: u8,
-    pub font_regular: PathBuf,
-    pub font_bold: PathBuf,
+    /// TrueType files; DejaVu Sans, wherever the distribution keeps it,
+    /// when unset. See [`Config::fonts`].
+    pub font_regular: Option<PathBuf>,
+    pub font_bold: Option<PathBuf>,
     /// Show only the date and time while the monitors are off or the session
     /// is locked, instead of the dashboard.
     pub clock_when_away: bool,
@@ -53,8 +68,8 @@ impl Default for Config {
         Self {
             refresh_seconds: DEFAULT_REFRESH_SECONDS,
             brightness: 100,
-            font_regular: "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf".into(),
-            font_bold: "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf".into(),
+            font_regular: None,
+            font_bold: None,
             clock_when_away: true,
             show_player: true,
             weather: WeatherConfig::default(),
@@ -72,6 +87,26 @@ impl Default for WeatherConfig {
             refresh_minutes: 15,
         }
     }
+}
+
+/// The first `dirs` entry holding `file`, or an error naming every path tried.
+fn find_font(dirs: &[impl AsRef<Path>], file: &str) -> anyhow::Result<PathBuf> {
+    let candidates: Vec<PathBuf> = dirs.iter().map(|dir| dir.as_ref().join(file)).collect();
+    candidates
+        .iter()
+        .find(|path| path.is_file())
+        .cloned()
+        .with_context(|| {
+            let tried: Vec<String> = candidates
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect();
+            format!(
+                "no {file} found (tried {}): install the DejaVu fonts package, or set \
+                 font_regular and font_bold in the configuration",
+                tried.join(", ")
+            )
+        })
 }
 
 fn default_path() -> Option<PathBuf> {
@@ -100,6 +135,24 @@ impl Config {
         Self::parse(&text).with_context(|| format!("parsing {}", path.display()))
     }
 
+    /// The regular and bold font files: those configured, or DejaVu Sans
+    /// from wherever the distribution keeps it.
+    ///
+    /// # Errors
+    ///
+    /// When a font is left unset and DejaVu Sans is in none of the usual
+    /// places; the message lists the paths tried.
+    pub fn fonts(&self) -> anyhow::Result<(PathBuf, PathBuf)> {
+        let find = |configured: &Option<PathBuf>, file| match configured {
+            Some(path) => Ok(path.clone()),
+            None => find_font(&FONT_DIRS, file),
+        };
+        Ok((
+            find(&self.font_regular, FONT_REGULAR)?,
+            find(&self.font_bold, FONT_BOLD)?,
+        ))
+    }
+
     fn parse(text: &str) -> anyhow::Result<Self> {
         let mut config: Self = toml::from_str(text)?;
         let asked = config.refresh_seconds;
@@ -108,7 +161,8 @@ impl Config {
         } else {
             DEFAULT_REFRESH_SECONDS
         };
-        if config.refresh_seconds != asked {
+        // NaN is in no range, so it is reported along with the rest.
+        if !(MIN_REFRESH_SECONDS..=MAX_REFRESH_SECONDS).contains(&asked) {
             eprintln!(
                 "refresh_seconds {asked} is out of reach, using {}",
                 config.refresh_seconds
@@ -124,7 +178,9 @@ impl Config {
     }
 }
 
+// The values compared are the very constants and literals that went in.
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
 
@@ -155,5 +211,49 @@ mod tests {
     #[test]
     fn unknown_keys_are_refused() {
         assert!(Config::parse("refresh_secondes = 1.0").is_err());
+    }
+
+    #[test]
+    fn fans_keep_the_order_they_are_written_in() {
+        let config = Config::parse("[fans]\n\"nct6799/fan7\" = \"rear\"\n\"amdgpu/fan1\" = \"gpu\"\n\"nct6799/fan1\" = \"front\"")
+            .unwrap();
+        let keys: Vec<&str> = config.fans.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["nct6799/fan7", "amdgpu/fan1", "nct6799/fan1"]);
+    }
+
+    #[test]
+    fn the_first_directory_holding_the_font_wins() {
+        let fonts = tempfile::tempdir().unwrap();
+        let (empty, fedora, debian) = (
+            fonts.path().join("empty"),
+            fonts.path().join("fedora"),
+            fonts.path().join("debian"),
+        );
+        for dir in [&empty, &fedora, &debian] {
+            fs::create_dir(dir).unwrap();
+        }
+        fs::write(fedora.join(FONT_REGULAR), b"ttf").unwrap();
+        fs::write(debian.join(FONT_REGULAR), b"ttf").unwrap();
+        fs::write(debian.join(FONT_BOLD), b"ttf").unwrap();
+        let dirs = [&empty, &fedora, &debian];
+        assert_eq!(
+            find_font(&dirs, FONT_REGULAR).unwrap(),
+            fedora.join(FONT_REGULAR)
+        );
+        assert_eq!(find_font(&dirs, FONT_BOLD).unwrap(), debian.join(FONT_BOLD));
+    }
+
+    #[test]
+    fn a_missing_font_names_every_path_tried() {
+        let fonts = tempfile::tempdir().unwrap();
+        let dirs = [fonts.path().join("a"), fonts.path().join("b")];
+        let error = find_font(&dirs, FONT_REGULAR).unwrap_err().to_string();
+        for dir in &dirs {
+            assert!(
+                error.contains(&dir.join(FONT_REGULAR).display().to_string()),
+                "{error}"
+            );
+        }
+        assert!(error.contains("font_regular"), "{error}");
     }
 }

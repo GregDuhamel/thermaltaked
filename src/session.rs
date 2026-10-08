@@ -76,6 +76,8 @@ pub struct Screens {
     complained: bool,
 }
 
+// getuid(2) has no safe wrapper in std; rustix would offer one.
+#[allow(unsafe_code)]
 fn graphical_session(connection: &Connection) -> zbus::Result<OwnedObjectPath> {
     let manager = Proxy::new(connection, LOGIND, MANAGER_PATH, MANAGER)?;
     if let Ok(id) = env::var("XDG_SESSION_ID")
@@ -181,11 +183,10 @@ mod tests {
     /// Builds a `/sys/class/drm` lookalike: one directory per connector,
     /// holding the two files the state is read from. Each case gets its own
     /// root, since the tests run side by side.
-    fn connectors(case: &str, outputs: &[(&str, &str, &str)]) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!("thermaltaked-drm-{case}"));
-        let _ = fs::remove_dir_all(&root);
+    fn connectors(outputs: &[(&str, &str, &str)]) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
         for (name, enabled, dpms) in outputs {
-            let connector = root.join(name);
+            let connector = root.path().join(name);
             fs::create_dir_all(&connector).unwrap();
             fs::write(connector.join("enabled"), format!("{enabled}\n")).unwrap();
             fs::write(connector.join("dpms"), format!("{dpms}\n")).unwrap();
@@ -195,30 +196,24 @@ mod tests {
 
     #[test]
     fn asleep_only_when_every_monitor_is_off() {
-        let both_off = connectors(
-            "both-off",
-            &[
-                ("card1-DP-2", "enabled", "Off"),
-                ("card1-DP-3", "enabled", "Off"),
-                ("card1-HDMI-A-1", "disabled", "Off"),
-            ],
-        );
-        assert!(monitors_asleep(&both_off));
+        let both_off = connectors(&[
+            ("card1-DP-2", "enabled", "Off"),
+            ("card1-DP-3", "enabled", "Off"),
+            ("card1-HDMI-A-1", "disabled", "Off"),
+        ]);
+        assert!(monitors_asleep(both_off.path()));
 
-        let one_on = connectors(
-            "one-on",
-            &[
-                ("card1-DP-2", "enabled", "Off"),
-                ("card1-DP-3", "enabled", "On"),
-            ],
-        );
-        assert!(!monitors_asleep(&one_on));
+        let one_on = connectors(&[
+            ("card1-DP-2", "enabled", "Off"),
+            ("card1-DP-3", "enabled", "On"),
+        ]);
+        assert!(!monitors_asleep(one_on.path()));
     }
 
     #[test]
     fn no_monitor_at_all_is_not_sleep() {
-        let unplugged = connectors("unplugged", &[("card1-DP-1", "disabled", "Off")]);
-        assert!(!monitors_asleep(&unplugged));
+        let unplugged = connectors(&[("card1-DP-1", "disabled", "Off")]);
+        assert!(!monitors_asleep(unplugged.path()));
         assert!(!monitors_asleep(Path::new("/nonexistent")));
     }
 }

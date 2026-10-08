@@ -1,5 +1,14 @@
 //! Draws the 480x128 dashboard.
 
+// Everything cast here is a pixel coordinate or a text width on a 480x128
+// panel, which every integer and float type used holds exactly.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
@@ -44,6 +53,12 @@ pub const ART_SIZE: u32 = HEIGHT;
 /// Room between the cover and the text beside it.
 const ART_GAP: i32 = 16;
 const FAN_BAND_TOP: i32 = 88;
+/// Narrowest fan cell in which a four-digit speed still reads; the band
+/// shows as many fans as cells of that width fit, and the rest go unshown.
+const FAN_CELL_MIN: i32 = 44;
+const FAN_CELL_MAX: i32 = 96;
+/// The band holds this many fans at most.
+pub const MAX_FANS: usize = ((LEFT_PANEL_RIGHT - MARGIN) / FAN_CELL_MIN) as usize;
 /// The clock and weather column starts here.
 const RIGHT_COLUMN_LEFT: i32 = 318;
 /// Axis of the date, clock, weather and load average.
@@ -473,10 +488,12 @@ impl Dashboard {
                 HEADER,
             );
             rect(image, 0, FAN_BAND_TOP, band_width, 1, RULE);
-            let cell = ((LEFT_PANEL_RIGHT - MARGIN) / snapshot.fans.len() as i32).min(96);
-            for (index, fan) in snapshot.fans.iter().enumerate() {
+            let fans = &snapshot.fans[..snapshot.fans.len().min(MAX_FANS)];
+            let cell = ((LEFT_PANEL_RIGHT - MARGIN) / fans.len() as i32).min(FAN_CELL_MAX);
+            for (index, fan) in fans.iter().enumerate() {
                 let center = MARGIN + cell * index as i32 + cell / 2;
-                let label = fan.label.to_uppercase();
+                let label =
+                    self.shortened(&fan.label.to_uppercase(), 10.0, false, (cell - 4) as u32);
                 self.text_centered(image, center, FAN_BAND_TOP + 6, 10.0, false, LABEL, &label);
                 let rpm = fan.rpm.to_string();
                 self.text_centered(image, center, FAN_BAND_TOP + 18, 15.0, true, TEXT, &rpm);

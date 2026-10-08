@@ -94,9 +94,12 @@ fn color_bars() -> RgbImage {
         [0, 0, 255],
         [0, 0, 0],
     ];
-    RgbImage::from_fn(WIDTH, HEIGHT, |x, _| {
-        Rgb(BARS[(x * BARS.len() as u32 / WIDTH) as usize])
-    })
+    let count = u32::try_from(BARS.len()).unwrap_or(u32::MAX);
+    RgbImage::from_fn(
+        WIDTH,
+        HEIGHT,
+        |x, _| Rgb(BARS[(x * count / WIDTH) as usize]),
+    )
 }
 
 struct Scene {
@@ -111,9 +114,11 @@ struct Scene {
 
 impl Scene {
     fn new(config: &Config) -> anyhow::Result<Self> {
-        let weather_refresh = Duration::from_secs(config.weather.refresh_minutes.max(1) * 60);
+        let weather_refresh =
+            Duration::from_secs(config.weather.refresh_minutes.max(1).saturating_mul(60));
+        let (regular, bold) = config.fonts()?;
         Ok(Self {
-            dashboard: Dashboard::new(&config.font_regular, &config.font_bold)?,
+            dashboard: Dashboard::new(&regular, &bold)?,
             sensors: Sensors::new(config),
             weather: config
                 .weather
@@ -183,8 +188,7 @@ fn preview(config: &Config, output: &Path, clock: bool) -> anyhow::Result<()> {
 }
 
 fn connect(brightness: u8) -> anyhow::Result<Lcd> {
-    let mut lcd = Lcd::open()?;
-    lcd.set_brightness(brightness)?;
+    let mut lcd = Lcd::open(brightness)?;
     lcd.start_heartbeat();
     Ok(lcd)
 }
@@ -273,8 +277,16 @@ fn run(config: &Config) -> anyhow::Result<()> {
                 (None, ScreenState::Awake) => scene.dashboard_frame(now),
                 (None, _) => scene.clock_frame(now),
             };
-            if let Err(error) = connected.send_frame(&frame) {
-                eprintln!("LCD lost: {error:#}");
+            // A heartbeat the panel stopped taking is as good as a failed upload.
+            let sent = if connected.heartbeat_stopped() {
+                Err("the heartbeat stopped".to_owned())
+            } else {
+                connected
+                    .send_frame(&frame)
+                    .map_err(|error| format!("{error:#}"))
+            };
+            if let Err(error) = sent {
+                eprintln!("LCD lost: {error}");
                 lcd = None;
                 pause = RECONNECT_DELAY;
             }
@@ -293,13 +305,14 @@ fn main() -> anyhow::Result<()> {
     let config = Config::load(cli.config.as_deref())?;
     match cli.command {
         Command::Info => info(),
-        Command::Test => Ok(Lcd::open()?.send_frame(&color_bars())?),
+        Command::Test => Ok(Lcd::open(config.brightness)?.send_frame(&color_bars())?),
         Command::Image { path } => {
             let image =
                 image::open(&path).with_context(|| format!("opening {}", path.display()))?;
-            Ok(Lcd::open()?.send_image(&image)?)
+            Ok(Lcd::open(config.brightness)?.send_image(&image)?)
         }
-        Command::Brightness { percent } => Ok(Lcd::open()?.set_brightness(percent)?),
+        // The handshake sets the backlight on its way out.
+        Command::Brightness { percent } => Lcd::open(percent).map(drop).map_err(Into::into),
         Command::Preview { output, clock } => preview(&config, &output, clock),
         Command::Run => run(&config),
     }

@@ -7,7 +7,7 @@ use std::io::{Cursor, Read};
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
@@ -86,10 +86,6 @@ fn percent_decoded(path: &str) -> PathBuf {
 
 impl CoverArt {
     /// Starts the thread that downloads and scales covers.
-    ///
-    /// # Panics
-    ///
-    /// When another thread panicked while holding the cover.
     #[must_use]
     pub fn new() -> Self {
         let slot = Arc::new(Mutex::new(Slot::default()));
@@ -105,7 +101,7 @@ impl CoverArt {
                 let image = fetch(&url, size)
                     .inspect_err(|error| eprintln!("cover art: {error:#}"))
                     .ok();
-                let mut slot = shared.lock().unwrap();
+                let mut slot = shared.lock().unwrap_or_else(PoisonError::into_inner);
                 // A later track may have been asked for in the meantime.
                 if slot.url == url {
                     slot.image = image;
@@ -117,13 +113,9 @@ impl CoverArt {
 
     /// The cover for `url`, once it has arrived. Asking for a new one starts
     /// its download and returns nothing until then.
-    ///
-    /// # Panics
-    ///
-    /// When another thread panicked while holding the cover.
     #[must_use]
     pub fn get(&self, url: &str, size: u32) -> Option<RgbImage> {
-        let mut slot = self.slot.lock().unwrap();
+        let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
         if slot.url != url {
             url.clone_into(&mut slot.url);
             slot.image = None;
