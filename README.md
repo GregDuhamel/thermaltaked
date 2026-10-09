@@ -52,7 +52,7 @@ make install-config                     # ~/.config/thermaltaked/config.toml, ke
 make install-unit                       # the user unit, enabled and started
 ```
 
-Building takes Rust 1.88 or later. The release profile strips the binary,
+Building takes Rust 1.89 or later. The release profile strips the binary,
 links it with thin LTO and aborts on panic, so a bug ends the process and
 systemd restarts it rather than leaving a half-dead daemon on the panel.
 `make check` runs what CI runs: fmt, check, clippy, the tests and the docs.

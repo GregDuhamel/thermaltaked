@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- `rust-version` is 1.89: `nalgebra`, `wide` and `safe_arch` (via `imageproc`)
+  need it, which the new MSRV job in CI was the first to check.
+
 ## [0.6.1] - 2026-10-09
 
 The release binary runs on any x86_64 distribution, and the pieces install
@@ -140,6 +147,7 @@ timeouts.
 Releases before 0.4.0 are described on their
 [GitHub releases](https://github.com/GregDuhamel/thermaltaked/releases).
 
+[Unreleased]: https://github.com/GregDuhamel/thermaltaked/compare/v0.6.1...HEAD
 [0.6.1]: https://github.com/GregDuhamel/thermaltaked/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/GregDuhamel/thermaltaked/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/GregDuhamel/thermaltaked/compare/v0.4.0...v0.5.0
