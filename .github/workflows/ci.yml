@@ -23,7 +23,7 @@ jobs:
     uses: GregDuhamel/uhid-battery/.github/workflows/rust-ci.yml@main
     with:
       # The MSRV declared in Cargo.toml.
-      msrv: "1.88"
+      msrv: "1.89"
       doc-private-items: true
 
   release-build:
