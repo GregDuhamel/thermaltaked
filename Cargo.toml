@@ -1,6 +1,6 @@
 [package]
 name = "thermaltaked"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 # let-chains, used throughout, landed in 1.88; nalgebra, wide and safe_arch
 # (pulled by imageproc) need 1.89.
