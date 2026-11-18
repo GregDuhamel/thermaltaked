@@ -7,8 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-18
+
+The D-Bus threads move to zbus 6, which has no blocking API.
+
 ### Changed
 
+- zbus 6.3, driven with `zbus::block_on` from each D-Bus thread: the
+  `mpris` and `logind` threads run every call as a future in a `block_on` of
+  their own (`bus::block_on`), with the same 2 s `method_timeout` on the
+  connection, and the `mpris-signals` and `logind-signals` threads read a
+  `MessageStream` the same way. No executor is set up: zbus's runtime runs in
+  whichever thread is inside `block_on`, and in a helper thread of its own
+  between two calls. A watcher thread now closes its connection on the way
+  out, which ends the stream its listener reads, so the four threads end when
+  nothing reads them anymore instead of waiting for one more signal.
+- zbus 6 renames `Value` to `Variant` and merges `zvariant` and `zbus_names`
+  into itself; the code uses the new names. `futures-core`, which zbus pulls
+  in anyway, is a direct dependency for the `Stream` trait. No other
+  dependency changed; `async-io`, `futures-lite` and the `async-*` crates
+  left the tree with zbus's blocking API.
 - `rust-version` is 1.89: `nalgebra`, `wide` and `safe_arch` (via `imageproc`)
   need it, which the new MSRV job in CI was the first to check.
 
@@ -153,7 +171,8 @@ timeouts.
 Releases before 0.4.0 are described on their
 [GitHub releases](https://github.com/GregDuhamel/thermaltaked/releases).
 
-[Unreleased]: https://github.com/GregDuhamel/thermaltaked/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/GregDuhamel/thermaltaked/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/GregDuhamel/thermaltaked/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/GregDuhamel/thermaltaked/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/GregDuhamel/thermaltaked/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/GregDuhamel/thermaltaked/compare/v0.5.0...v0.6.0

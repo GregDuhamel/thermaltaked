@@ -187,6 +187,18 @@ thread, not the drawing loop, and the panel keeps drawing with the last state
 published. A bus that is not there yet, or a session logind does not know, is
 tried again every 30 s and complained about once.
 
+The bus is spoken to through zbus 6, which has no blocking API: every call is
+a future, and each thread runs its own with `zbus::block_on` (`bus::block_on`
+in `src/bus.rs`), one call at a time. There is no executor to set up: zbus's
+own runtime lives in whichever thread is inside `block_on`, drives the
+connection while that thread waits for its reply, and leaves it to a helper
+thread of its own between two calls. The timeout is the connection's
+(`method_timeout` on its builder), so a call that times out fails the same
+way it did before. The listener thread reads the connection's `MessageStream`
+inside one `block_on` of its own; the stream ends when the connection does,
+and the thread that owns the connection closes it when it is done, so the
+listener ends with it and nothing is left behind.
+
 ## How it talks to the panel
 
 The transport is the [hidraw](https://github.com/GregDuhamel/hidraw) crate,
