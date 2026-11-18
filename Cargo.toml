@@ -1,6 +1,6 @@
 [package]
 name = "thermaltaked"
-version = "0.6.2"
+version = "0.7.0"
 edition = "2024"
 # let-chains, used throughout, landed in 1.88; nalgebra, wide and safe_arch
 # (pulled by imageproc) need 1.89.
@@ -17,6 +17,9 @@ chrono = "0.4.45"
 clap = { version = "4.6.7", features = ["derive"] }
 # Colored, timestamped lines on a terminal; journald priorities under systemd.
 env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
+# The `Stream` trait alone, to take the next message off a zbus stream; zbus
+# pulls the crate in anyway and re-exports no stream combinator of its own.
+futures-core = "0.3.30"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 imageproc = { version = "0.27.0", default-features = false, features = ["text"] }
 # The hidraw transport: sysfs discovery, output reports, poll with timeout,
@@ -33,7 +36,9 @@ thiserror = "2.0.20"
 # `preserve_order` the fans would come out sorted rather than as written.
 toml = { version = "1.1.6", features = ["preserve_order"] }
 ureq = { version = "3.4.2", features = ["json"] }
-zbus = "5.19.0"
+# The async API driven with `zbus::block_on` from each D-Bus thread: zbus 6
+# has no blocking API, and its own runtime (`default-rt`) needs no executor.
+zbus = "6.3"
 
 [dev-dependencies]
 serde_json = "1.0.151"

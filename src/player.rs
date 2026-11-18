@@ -3,10 +3,11 @@
 //!
 //! The thread asks the bus for its names, then every `org.mpris.MediaPlayer2.*`
 //! for all of its player properties, about once a second and sooner when a
-//! player announces a change. The drawing loop reads only what the thread
-//! last published, and moves the position along on its own between two
-//! readings, so a player that stops answering holds up at most the thread,
-//! and only for the call's timeout.
+//! player announces a change; each round of calls is one future, run with
+//! [`bus::block_on`]. The drawing loop reads only what the thread last
+//! published, and moves the position along on its own between two readings,
+//! so a player that stops answering holds up at most the thread, and only
+//! for the call's timeout.
 
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -14,12 +15,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use log::{debug, warn};
-use zbus::blocking::Connection;
-use zbus::blocking::fdo::PropertiesProxy;
+use zbus::fdo::PropertiesProxy;
 use zbus::message::Type;
 use zbus::names::InterfaceName;
-use zbus::zvariant::OwnedValue;
-use zbus::{MatchRule, fdo};
+use zbus::{Array, Connection, MatchRule, OwnedVariant, Proxy, Str, fdo};
 
 use crate::background::{Background, Publisher};
 use crate::bus;
@@ -82,18 +81,18 @@ struct Reading {
     taken: Instant,
 }
 
-fn text_value(value: Option<&OwnedValue>) -> Option<String> {
-    let text = value?.downcast_ref::<zbus::zvariant::Str<'_>>().ok()?;
+fn text_value(value: Option<&OwnedVariant>) -> Option<String> {
+    let text = value?.downcast_ref::<Str<'_>>().ok()?;
     Some(text.as_str().to_owned())
 }
 
-fn text(metadata: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
+fn text(metadata: &HashMap<String, OwnedVariant>, key: &str) -> Option<String> {
     let value = metadata.get(key)?;
-    if let Ok(text) = value.downcast_ref::<zbus::zvariant::Str<'_>>() {
+    if let Ok(text) = value.downcast_ref::<Str<'_>>() {
         return Some(text.as_str().to_owned());
     }
     // Artists come as an array of strings, however many of them there are.
-    let array = value.downcast_ref::<zbus::zvariant::Array>().ok()?;
+    let array = value.downcast_ref::<Array<'_>>().ok()?;
     let joined: Vec<String> = array
         .iter()
         .filter_map(|item| Some(item.downcast_ref::<&str>().ok()?.to_owned()))
@@ -102,14 +101,14 @@ fn text(metadata: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
 }
 
 /// MPRIS asks for signed microseconds, but some players send unsigned ones.
-fn duration(value: &OwnedValue) -> Option<Duration> {
+fn duration(value: &OwnedVariant) -> Option<Duration> {
     if let Ok(micros) = value.downcast_ref::<i64>() {
         return u64::try_from(micros).ok().map(Duration::from_micros);
     }
     value.downcast_ref::<u64>().ok().map(Duration::from_micros)
 }
 
-fn micros(metadata: &HashMap<String, OwnedValue>, key: &str) -> Option<Duration> {
+fn micros(metadata: &HashMap<String, OwnedVariant>, key: &str) -> Option<Duration> {
     duration(metadata.get(key)?)
 }
 
@@ -151,16 +150,18 @@ impl Default for Players {
 /// `PropertiesChanged` from any player: they all live at the same path,
 /// whatever their name.
 fn changes_rule() -> zbus::Result<MatchRule<'static>> {
-    Ok(MatchRule::builder()
+    MatchRule::builder()
         .msg_type(Type::Signal)
-        .interface(PROPERTIES)?
-        .member("PropertiesChanged")?
-        .path(MPRIS_PATH)?
-        .build())
+        .interface(PROPERTIES)
+        .member("PropertiesChanged")
+        .path(MPRIS_PATH)
+        .build()
 }
 
 /// The thread: connects, then reads the players again on every nudge and
 /// at least every [`POLL`], until the bus goes away, when it starts over.
+/// The connection is closed on the way out, which ends the listener thread
+/// with the stream it reads.
 fn watch(publisher: &Publisher<Reading>) {
     let mut complaint = Complaint::default();
     while !publisher.abandoned() {
@@ -179,6 +180,7 @@ fn watch(publisher: &Publisher<Reading>) {
         complaint.withdraw("session bus reachable again");
         let mut frozen = Frozen::default();
         let error = follow(&connection, &nudges, &mut frozen, publisher);
+        bus::close(connection);
         if publisher.abandoned() {
             return;
         }
@@ -201,7 +203,7 @@ fn follow(
     publisher: &Publisher<Reading>,
 ) -> zbus::Error {
     loop {
-        match now_playing(connection, frozen) {
+        match bus::block_on(now_playing(connection, frozen)) {
             Ok(playing) => publisher.publish(Reading {
                 playing,
                 taken: Instant::now(),
@@ -251,23 +253,27 @@ impl Frozen {
 
 /// Every property of the player interface, in one round trip and none of it
 /// cached: the position moves along without a signal to announce it.
-fn properties(connection: &Connection, name: &str) -> fdo::Result<HashMap<String, OwnedValue>> {
+async fn properties(
+    connection: &Connection,
+    name: &str,
+) -> fdo::Result<HashMap<String, OwnedVariant>> {
     let player = InterfaceName::from_static_str_unchecked(PLAYER);
     let properties = PropertiesProxy::builder(connection)
-        .destination(name.to_owned())?
-        .path(MPRIS_PATH)?
-        .build()?;
-    properties.get_all(player)
+        .destination(name.to_owned())
+        .path(MPRIS_PATH)
+        .build()
+        .await?;
+    properties.get_all(player).await
 }
 
 /// What a player is playing, from its properties, when it is.
-fn playing_from(all: &HashMap<String, OwnedValue>) -> Option<NowPlaying> {
+fn playing_from(all: &HashMap<String, OwnedVariant>) -> Option<NowPlaying> {
     if text_value(all.get("PlaybackStatus")).as_deref() != Some("Playing") {
         return None;
     }
     let metadata = all
         .get("Metadata")
-        .and_then(|value| HashMap::<String, OwnedValue>::try_from(value.clone()).ok())
+        .and_then(|value| HashMap::<String, OwnedVariant>::try_from(value.clone()).ok())
         .unwrap_or_default();
     // Some browser tabs play without saying what: nothing worth the panel.
     let title = text(&metadata, "xesam:title").filter(|title| !title.is_empty())?;
@@ -286,14 +292,17 @@ fn playing_from(all: &HashMap<String, OwnedValue>) -> Option<NowPlaying> {
 /// Fails only when the bus itself is out of reach: a player that leaves
 /// between `ListNames` and its own answer is skipped, not held against the
 /// others, and one that never answers is noted and left alone for a while.
-fn now_playing(connection: &Connection, frozen: &mut Frozen) -> zbus::Result<Option<NowPlaying>> {
-    let bus = zbus::blocking::Proxy::new(connection, DBUS, DBUS_PATH, DBUS)?;
-    let names: Vec<String> = bus.call("ListNames", &())?;
+async fn now_playing(
+    connection: &Connection,
+    frozen: &mut Frozen,
+) -> zbus::Result<Option<NowPlaying>> {
+    let bus = Proxy::new(connection, DBUS, DBUS_PATH, DBUS).await?;
+    let names: Vec<String> = bus.call("ListNames", &()).await?;
     for name in names.into_iter().filter(|n| n.starts_with(MPRIS_PREFIX)) {
         if frozen.holds(&name) {
             continue;
         }
-        let all = match properties(connection, &name) {
+        let all = match properties(connection, &name).await {
             Ok(all) => all,
             Err(fdo::Error::ZBus(error)) if bus::timed_out(&error) => {
                 frozen.add(name);
@@ -315,9 +324,9 @@ fn now_playing(connection: &Connection, frozen: &mut Frozen) -> zbus::Result<Opt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zbus::zvariant::{Dict, Signature, Value};
+    use zbus::{Dict, Signature, Variant};
 
-    fn metadata(entries: Vec<(&str, Value<'_>)>) -> HashMap<String, OwnedValue> {
+    fn metadata(entries: Vec<(&str, Variant<'_>)>) -> HashMap<String, OwnedVariant> {
         entries
             .into_iter()
             .map(|(key, value)| (key.to_owned(), value.try_to_owned().unwrap()))
@@ -327,8 +336,11 @@ mod tests {
     #[test]
     fn titles_and_artists_are_read() {
         let metadata = metadata(vec![
-            ("xesam:title", Value::from("Adagio for Strings")),
-            ("xesam:artist", Value::from(vec!["Tiësto", "Someone Else"])),
+            ("xesam:title", Variant::from("Adagio for Strings")),
+            (
+                "xesam:artist",
+                Variant::from(vec!["Tiësto", "Someone Else"]),
+            ),
         ]);
         assert_eq!(
             text(&metadata, "xesam:title").as_deref(),
@@ -344,9 +356,9 @@ mod tests {
     #[test]
     fn lengths_come_signed_or_not() {
         let metadata = metadata(vec![
-            ("signed", Value::from(418_000_000_i64)),
-            ("unsigned", Value::from(418_000_000_u64)),
-            ("negative", Value::from(-1_i64)),
+            ("signed", Variant::from(418_000_000_i64)),
+            ("unsigned", Variant::from(418_000_000_u64)),
+            ("negative", Variant::from(-1_i64)),
         ]);
         assert_eq!(micros(&metadata, "signed"), Some(Duration::from_secs(418)));
         assert_eq!(
@@ -358,7 +370,10 @@ mod tests {
 
     /// The player's properties as `GetAll` returns them, the metadata being a
     /// dictionary of variants.
-    fn properties(status: &str, metadata: Vec<(&str, Value<'_>)>) -> HashMap<String, OwnedValue> {
+    fn properties(
+        status: &str,
+        metadata: Vec<(&str, Variant<'_>)>,
+    ) -> HashMap<String, OwnedVariant> {
         let mut dict = Dict::new(&Signature::Str, &Signature::Variant);
         for (key, value) in metadata {
             dict.add(key, value).unwrap();
@@ -366,15 +381,15 @@ mod tests {
         let mut all = HashMap::new();
         all.insert(
             "PlaybackStatus".to_owned(),
-            Value::from(status).try_to_owned().unwrap(),
+            Variant::from(status).try_to_owned().unwrap(),
         );
         all.insert(
             "Metadata".to_owned(),
-            Value::Dict(dict).try_to_owned().unwrap(),
+            Variant::Dict(dict).try_to_owned().unwrap(),
         );
         all.insert(
             "Position".to_owned(),
-            Value::from(97_000_000_i64).try_to_owned().unwrap(),
+            Variant::from(97_000_000_i64).try_to_owned().unwrap(),
         );
         all
     }
@@ -384,9 +399,9 @@ mod tests {
         let all = properties(
             "Playing",
             vec![
-                ("xesam:title", Value::from("Adagio for Strings")),
-                ("xesam:artist", Value::from(vec!["Tiësto"])),
-                ("mpris:length", Value::from(418_000_000_i64)),
+                ("xesam:title", Variant::from("Adagio for Strings")),
+                ("xesam:artist", Variant::from(vec!["Tiësto"])),
+                ("mpris:length", Variant::from(418_000_000_i64)),
             ],
         );
         let playing = playing_from(&all).unwrap();
@@ -399,9 +414,9 @@ mod tests {
 
     #[test]
     fn paused_and_untitled_players_are_passed_over() {
-        let paused = properties("Paused", vec![("xesam:title", Value::from("Anything"))]);
+        let paused = properties("Paused", vec![("xesam:title", Variant::from("Anything"))]);
         assert!(playing_from(&paused).is_none());
-        let untitled = properties("Playing", vec![("xesam:title", Value::from(""))]);
+        let untitled = properties("Playing", vec![("xesam:title", Variant::from(""))]);
         assert!(playing_from(&untitled).is_none());
     }
 
@@ -410,8 +425,8 @@ mod tests {
         let all = properties(
             "Playing",
             vec![
-                ("xesam:title", Value::from("Adagio for Strings")),
-                ("mpris:length", Value::from(100_000_000_i64)),
+                ("xesam:title", Variant::from("Adagio for Strings")),
+                ("mpris:length", Variant::from(100_000_000_i64)),
             ],
         );
         let playing = playing_from(&all).unwrap();

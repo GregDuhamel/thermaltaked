@@ -2,8 +2,9 @@
 //!
 //! The monitors are read from sysfs on every frame, which costs nothing. The
 //! lock comes from logind over D-Bus, which a thread of its own asks about
-//! once a second and whenever the session announces a change; the drawing
-//! loop reads only what that thread last published.
+//! once a second and whenever the session announces a change, each read a
+//! future run with [`bus::block_on`]; the drawing loop reads only what that
+//! thread last published.
 
 use std::env;
 use std::fs;
@@ -13,12 +14,9 @@ use std::thread;
 use std::time::Duration;
 
 use log::debug;
-use zbus::MatchRule;
-use zbus::blocking::proxy::Builder as ProxyBuilder;
-use zbus::blocking::{Connection, Proxy};
 use zbus::message::Type;
-use zbus::proxy::CacheProperties;
-use zbus::zvariant::OwnedObjectPath;
+use zbus::proxy::{Builder as ProxyBuilder, CacheProperties};
+use zbus::{Connection, MatchRule, OwnedObjectPath, Proxy};
 
 use crate::background::{Background, Publisher};
 use crate::bus;
@@ -94,27 +92,47 @@ pub struct Screens {
     locked: Background<bool>,
 }
 
-fn graphical_session(connection: &Connection) -> zbus::Result<OwnedObjectPath> {
-    let manager = Proxy::new(connection, LOGIND, MANAGER_PATH, MANAGER)?;
+/// The session object at `path`, its properties not cached: each read asks
+/// logind, and a stale hint is worse than a round trip a second.
+async fn session_proxy(
+    connection: &Connection,
+    path: OwnedObjectPath,
+) -> zbus::Result<Proxy<'static>> {
+    ProxyBuilder::new(connection)
+        .destination(LOGIND)
+        .path(path)
+        .interface(SESSION)
+        .cache_properties(CacheProperties::No)
+        .build()
+        .await
+}
+
+async fn graphical_session(connection: &Connection) -> zbus::Result<OwnedObjectPath> {
+    let manager = Proxy::new(connection, LOGIND, MANAGER_PATH, MANAGER).await?;
     if let Ok(id) = env::var("XDG_SESSION_ID")
-        && let Ok(path) = manager.call::<_, _, OwnedObjectPath>("GetSession", &(id.as_str()))
+        && let Ok(path) = manager
+            .call::<_, _, OwnedObjectPath>("GetSession", &(id.as_str()))
+            .await
     {
         return Ok(path);
     }
     // No session id to go by, so take this user's first graphical session.
     let uid = rustix::process::getuid().as_raw();
     let sessions: Vec<(String, u32, String, String, OwnedObjectPath)> =
-        manager.call("ListSessions", &())?;
-    sessions
-        .into_iter()
-        .filter(|session| session.1 == uid)
-        .find(|session| {
-            Proxy::new(connection, LOGIND, session.4.clone(), SESSION)
-                .and_then(|session| session.get_property::<String>("Type"))
-                .is_ok_and(|kind| GRAPHICAL_TYPES.contains(&kind.as_str()))
-        })
-        .map(|session| session.4)
-        .ok_or_else(|| zbus::Error::Failure("no graphical session".to_owned()))
+        manager.call("ListSessions", &()).await?;
+    for (_, owner, _, _, path) in sessions {
+        if owner != uid {
+            continue;
+        }
+        let kind = match session_proxy(connection, path.clone()).await {
+            Ok(session) => session.get_property::<String>("Type").await,
+            Err(error) => Err(error),
+        };
+        if kind.is_ok_and(|kind| GRAPHICAL_TYPES.contains(&kind.as_str())) {
+            return Ok(path);
+        }
+    }
+    Err(zbus::Error::Failure("no graphical session".to_owned()))
 }
 
 impl Screens {
@@ -155,35 +173,33 @@ impl Default for Screens {
 /// rule, since a well-known name there would never match the unique name
 /// the signal carries.
 fn changes_rule(session: &OwnedObjectPath) -> zbus::Result<MatchRule<'static>> {
-    Ok(MatchRule::builder()
+    MatchRule::builder()
         .msg_type(Type::Signal)
-        .interface(PROPERTIES)?
-        .member("PropertiesChanged")?
-        .path(session.clone())?
-        .build())
+        .interface(PROPERTIES)
+        .member("PropertiesChanged")
+        .path(session.clone())
+        .build()
 }
 
 /// The thread: finds the session, then reads `LockedHint` on every nudge and
 /// at least every [`POLL`], until logind or the bus fails, when it starts
 /// over. Until it finds the session the lock goes unnoticed, which is worth
-/// one line in the log and no more: the monitors still say most of it.
+/// one line in the log and no more: the monitors still say most of it. The
+/// connection is closed on the way out, which ends the listener thread with
+/// the stream it reads.
 fn watch(publisher: &Publisher<bool>) {
     let mut complaint = Complaint::default();
     while !publisher.abandoned() {
         let connected = bus::system().and_then(|connection| {
-            let path = graphical_session(&connection)?;
+            let (path, session) = bus::block_on(async {
+                let path = graphical_session(&connection).await?;
+                let session = session_proxy(&connection, path.clone()).await?;
+                Ok::<_, zbus::Error>((path, session))
+            })?;
             let nudges = bus::nudges(&connection, changes_rule(&path)?, "logind-signals")?;
-            // Not cached: each read asks logind, and a stale hint is worse
-            // than a round trip a second.
-            let session: Proxy<'static> = ProxyBuilder::new(&connection)
-                .destination(LOGIND)?
-                .path(path)?
-                .interface(SESSION)?
-                .cache_properties(CacheProperties::No)
-                .build()?;
-            Ok((session, nudges))
+            Ok((connection, session, nudges))
         });
-        let (session, nudges) = match connected {
+        let (connection, session, nudges) = match connected {
             Ok(connected) => connected,
             Err(error) => {
                 complaint.raise(format!("lock state unavailable: {error}"));
@@ -193,6 +209,10 @@ fn watch(publisher: &Publisher<bool>) {
         };
         complaint.withdraw("lock state readable again");
         let error = follow(&session, &nudges, publisher);
+        // The proxy goes first, while the connection it holds is still open;
+        // closing it then ends the listener's stream.
+        drop(session);
+        bus::close(connection);
         if publisher.abandoned() {
             return;
         }
@@ -206,7 +226,7 @@ fn watch(publisher: &Publisher<bool>) {
 /// Reads the hint until the session or the bus fails, and says how.
 fn follow(session: &Proxy<'_>, nudges: &Receiver<()>, publisher: &Publisher<bool>) -> zbus::Error {
     loop {
-        match session.get_property::<bool>("LockedHint") {
+        match bus::block_on(session.get_property::<bool>("LockedHint")) {
             Ok(locked) => {
                 if locked != publisher.latest() {
                     debug!(
